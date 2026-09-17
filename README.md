@@ -92,6 +92,40 @@ MAI_FOUNDRY_ENDPOINT
 
 If the provider does not appear, restart the dashboard after installing the package. A browser refresh alone does not reload Python plugins.
 
+### Updating Hermes later
+
+Hermes updates do not normally change this GitHub-installed plugin or its configuration. The API key, endpoint, deployment selection, and plugin-enabled state are stored separately in the active Hermes profile.
+
+After a normal Hermes update, verify the plugin:
+
+```bash
+hermes plugins list
+```
+
+If `azure-mai-image` is still listed as enabled, restart Hermes processes:
+
+```bash
+hermes gateway restart
+hermes dashboard --stop
+hermes dashboard
+```
+
+If the Hermes update recreated or replaced its Python virtual environment, reinstall the plugin into the new Hermes environment:
+
+```bash
+/usr/local/lib/hermes-agent/venv/bin/pip install --upgrade \\
+  "git+https://github.com/joescars/hermes-mai-image.git"
+```
+
+Then enable it again if necessary and restart Hermes:
+
+```bash
+hermes plugins enable azure-mai-image
+hermes gateway restart
+```
+
+You do not need to re-enter the API key unless the active Hermes profile changed or its `.env` was intentionally reset.
+
 ### 7. Set the deployment explicitly when needed
 
 For most Foundry deployments, set the exact deployment name in the active Hermes profile's `.env`:
