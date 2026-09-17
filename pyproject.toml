@@ -14,7 +14,7 @@ dependencies = ["requests>=2.28"]
 test = ["pytest>=8"]
 
 [project.entry-points."hermes_agent.plugins"]
-azure-mai-image = "hermes_mai_image"
+azure-mai-image = "hermes_mai_image:register"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hermes_mai_image"]
