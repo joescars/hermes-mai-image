@@ -1,0 +1,8 @@
+name: azure-mai-image
+version: 0.1.0
+description: "Microsoft Foundry MAI image generation and image editing backend."
+author: Hermes community
+kind: backend
+requires_env:
+  - MAI_FOUNDRY_API_KEY
+  - MAI_FOUNDRY_ENDPOINT

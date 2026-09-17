@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-mai-image"
+version = "0.1.0"
+description = "Microsoft Foundry MAI image generation backend for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.28"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.entry-points."hermes_agent.plugins"]
+azure-mai-image = "hermes_mai_image"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_mai_image"]
+include = ["src/hermes_mai_image/plugin.yaml"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
