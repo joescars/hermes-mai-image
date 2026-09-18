@@ -158,6 +158,49 @@ def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):
     assert called == []
 
 
+def test_runtime_configuration_is_resolved_after_provider_creation(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_FOUNDRY_API_KEY", raising=False)
+    monkeypatch.delenv("MAI_FOUNDRY_ENDPOINT", raising=False)
+    instance = provider.MAIImageProvider()
+    assert instance.is_available() is False
+
+    monkeypatch.setenv("MAI_FOUNDRY_API_KEY", "new-key")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://new.services.ai.azure.com")
+    monkeypatch.setenv("MAI_IMAGE_MODEL", "new-deployment")
+
+    assert instance.is_available() is True
+    assert instance.default_model() == "new-deployment"
+
+
+def test_config_model_is_used_when_environment_model_is_unset(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_MODEL", raising=False)
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {"image_gen": {"model": "configured-deployment"}})
+
+    assert provider.MAIImageProvider(model=None).default_model() == "configured-deployment"
+
+
+def test_deployment_error_explains_exact_name(monkeypatch):
+    provider = load_provider(monkeypatch)
+
+    class Response:
+        status_code = 404
+        text = "deployment missing"
+
+        def json(self):
+            return {"error": {"message": "deployment missing"}}
+
+    error = provider.requests.HTTPError("not found", response=Response())
+    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+    result = provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model="my-deployment"
+    ).generate("cat")
+
+    assert result["success"] is False
+    assert "exact deployment name" in result["error"]
+
+
 def test_missing_credentials_returns_auth_error(monkeypatch):
     provider = load_provider(monkeypatch)
     result = provider.MAIImageProvider(api_key="", endpoint="", model="deployment").generate("cat")
