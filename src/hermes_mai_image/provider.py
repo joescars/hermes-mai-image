@@ -6,11 +6,15 @@ The MAI API is not OpenAI-compatible: it uses ``/mai/v1`` endpoints,
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import mimetypes
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -25,6 +29,14 @@ from agent.image_gen_provider import (
 )
 
 logger = logging.getLogger(__name__)
+
+try:
+    from agent.file_safety import raise_if_read_blocked
+except ImportError:  # pragma: no cover - only for standalone import outside Hermes
+    def raise_if_read_blocked(_path: str) -> None:
+        return
+
+MAX_REMOTE_IMAGE_BYTES = 50 * 1024 * 1024
 
 DEFAULT_ENDPOINT = ""
 DEFAULT_MODEL = "MAI-Image-2.5"
@@ -105,18 +117,38 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     return models
 
 
+def _download_remote_image(url: str, destination: Path) -> Path:
+    """Use Hermes' SSRF-safe, redirect-checked, bounded image downloader."""
+    from tools.vision_tools import _download_image
+
+    return asyncio.run(_download_image(url, destination))
+
+
 def _load_source(source: str):
     """Return a named file tuple accepted by requests' multipart encoder."""
+    source = source.strip()
     if source.startswith(("http://", "https://")):
-        response = requests.get(source, timeout=60)
-        response.raise_for_status()
-        name = source.split("?", 1)[0].rsplit("/", 1)[-1] or "reference.png"
-        return name, response.content, response.headers.get("Content-Type", "image/png")
+        filename = Path(urlsplit(source).path).name or "reference.png"
+        suffix = Path(filename).suffix or ".img"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            temp_path = Path(handle.name)
+        try:
+            _download_remote_image(source, temp_path)
+            data = temp_path.read_bytes()
+        finally:
+            temp_path.unlink(missing_ok=True)
+        content_type = mimetypes.guess_type(filename)[0] or "image/png"
+        return filename, data, content_type
+
     path = Path(source).expanduser()
+    raise_if_read_blocked(str(path))
     if not path.is_file():
         raise FileNotFoundError(source)
-    content_type = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
-    return path.name, path.read_bytes(), content_type
+    data = path.read_bytes()
+    if len(data) > MAX_REMOTE_IMAGE_BYTES:
+        raise ValueError(f"Image exceeds {MAX_REMOTE_IMAGE_BYTES} byte limit")
+    content_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    return path.name, data, content_type
 
 
 def _image_result(body: Any, *, provider: str, model: str, prompt: str, aspect: str):
