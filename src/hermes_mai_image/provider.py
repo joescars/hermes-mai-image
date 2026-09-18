@@ -241,6 +241,12 @@ class MAIImageProvider(ImageGenProvider):
 
         sources = ([image_url] if image_url else []) + list(reference_image_urls or [])
         try:
+            if len(sources) > 1:
+                return _error(
+                    self.name, prompt, aspect,
+                    "Microsoft Foundry MAI image editing supports at most one "
+                    "source image. Reduce reference images to exactly one.",
+                    "too_many_references", model)
             if sources:
                 name, data, content_type = _load_source(sources[0])
                 response = requests.post(
