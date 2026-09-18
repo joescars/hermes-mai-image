@@ -158,6 +158,17 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     return models
 
 
+def _validate_image_bytes(data: bytes, content_type: str) -> str:
+    """Reject non-images and return the authoritative MIME type from magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    raise ValueError(f"Source is not a supported image (received {content_type or 'unknown type'})")
 def _download_remote_image(url: str, destination: Path) -> Path:
     """Use Hermes' SSRF-safe, redirect-checked, bounded image downloader."""
     from tools.vision_tools import _download_image
@@ -179,6 +190,7 @@ def _load_source(source: str):
         finally:
             temp_path.unlink(missing_ok=True)
         content_type = mimetypes.guess_type(filename)[0] or "image/png"
+        content_type = _validate_image_bytes(data, content_type)
         return filename, data, content_type
 
     path = Path(source).expanduser()
@@ -189,6 +201,7 @@ def _load_source(source: str):
     if len(data) > MAX_REMOTE_IMAGE_BYTES:
         raise ValueError(f"Image exceeds {MAX_REMOTE_IMAGE_BYTES} byte limit")
     content_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    content_type = _validate_image_bytes(data, content_type)
     return path.name, data, content_type
 
 
