@@ -109,6 +109,37 @@ def test_edit_uses_multipart_image_upload(monkeypatch, tmp_path):
     assert calls["kwargs"]["files"]["image"][0] == "source.png"
 
 
+def test_edit_blocks_credential_path(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    secret = tmp_path / ".env"
+    secret.write_text("MAI_FOUNDRY_API_KEY=secret")
+
+    def block(path):
+        raise ValueError(f"blocked: {path}")
+
+    monkeypatch.setattr(provider, "raise_if_read_blocked", block)
+    with pytest.raises(ValueError, match="blocked"):
+        provider._load_source(str(secret))
+
+
+def test_remote_edit_uses_safe_bounded_download(monkeypatch):
+    provider = load_provider(monkeypatch)
+    calls = []
+
+    def safe_download(url, destination):
+        calls.append((url, destination))
+        destination.write_bytes(b"remote image")
+        return destination
+
+    monkeypatch.setattr(provider, "_download_remote_image", safe_download)
+    name, data, content_type = provider._load_source("https://images.example/source.png")
+
+    assert calls[0][0] == "https://images.example/source.png"
+    assert name == "source.png"
+    assert data == b"remote image"
+    assert content_type == "image/png"
+
+
 def test_missing_credentials_returns_auth_error(monkeypatch):
     provider = load_provider(monkeypatch)
     result = provider.MAIImageProvider(api_key="", endpoint="", model="deployment").generate("cat")
