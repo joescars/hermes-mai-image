@@ -140,6 +140,24 @@ def test_remote_edit_uses_safe_bounded_download(monkeypatch):
     assert content_type == "image/png"
 
 
+def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    first.write_bytes(b"image")
+    second.write_bytes(b"image")
+
+    called = []
+    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: called.append(1))
+    result = provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
+    ).generate("edit", "square", image_url=str(first), reference_image_urls=[str(second)])
+
+    assert result["success"] is False
+    assert result["error_type"] == "too_many_references"
+    assert called == []
+
+
 def test_missing_credentials_returns_auth_error(monkeypatch):
     provider = load_provider(monkeypatch)
     result = provider.MAIImageProvider(api_key="", endpoint="", model="deployment").generate("cat")
