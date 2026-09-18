@@ -73,6 +73,47 @@ def _headers(api_key: str) -> Dict[str, str]:
     return {"api-key": api_key, "Accept": "application/json"}
 
 
+def _load_image_gen_config() -> Dict[str, Any]:
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        return config if isinstance(config, dict) else {}
+    except Exception:
+        return {}
+
+
+def _configured_model() -> Optional[str]:
+    config = _load_image_gen_config()
+    section = config.get("image_gen") if isinstance(config, dict) else None
+    if not isinstance(section, dict):
+        return None
+    scoped = section.get("azure-mai")
+    if isinstance(scoped, dict) and str(scoped.get("model") or "").strip():
+        return str(scoped["model"]).strip()
+    model = section.get("model")
+    return str(model).strip() if isinstance(model, str) and model.strip() else None
+
+
+def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
+    return str(explicit or override or _setting(MODEL_ENV) or _configured_model() or DEFAULT_MODEL)
+
+
+def _http_error_message(response: Any, model: str) -> str:
+    status = getattr(response, "status_code", None)
+    try:
+        body = response.json()
+        detail = body.get("error", {}).get("message") if isinstance(body, dict) else None
+    except Exception:
+        detail = None
+    detail = str(detail or getattr(response, "text", "") or "request rejected").strip()
+    if status in (400, 404):
+        return (
+            f"MAI deployment '{model}' was not found or is not available on this Foundry resource "
+            f"({status}). Use the exact deployment name from Microsoft Foundry. Details: {detail}"
+        )
+    return f"MAI request failed ({status or 'unknown status'}): {detail}"
+
+
 def _error(provider: str, prompt: str, aspect: str, message: str, error_type: str, model: str = ""):
     return error_response(
         error=message,
@@ -180,10 +221,16 @@ class MAIImageProvider(ImageGenProvider):
     label = "Microsoft Foundry MAI"
 
     def __init__(self, api_key: Optional[str] = None, endpoint: Optional[str] = None, model: Optional[str] = None):
-        self.api_key = api_key if api_key is not None else _setting(API_KEY_ENV)
-        self.endpoint = _endpoint(endpoint)
-        self.model = model or _setting(MODEL_ENV, DEFAULT_MODEL)
+        self.api_key_override = api_key
+        self.endpoint_override = endpoint
+        self.model_override = model
         self._models: Optional[List[Dict[str, str]]] = None
+
+    def _credentials(self) -> tuple[str, str]:
+        return (
+            self.api_key_override if self.api_key_override is not None else _setting(API_KEY_ENV),
+            _endpoint(self.endpoint_override),
+        )
 
     @property
     def name(self) -> str:
@@ -194,19 +241,21 @@ class MAIImageProvider(ImageGenProvider):
         return self.label
 
     def is_available(self) -> bool:
-        return bool(self.api_key and self.endpoint)
+        api_key, endpoint = self._credentials()
+        return bool(api_key and endpoint)
 
     def list_models(self) -> List[Dict[str, str]]:
+        api_key, endpoint = self._credentials()
         if self._models is None:
             try:
-                self._models = discover_models(self.endpoint, self.api_key)
+                self._models = discover_models(endpoint, api_key)
             except Exception as exc:
                 logger.debug("MAI model discovery unavailable: %s", exc)
                 self._models = []
         return self._models or [{"id": model, "display": model} for model in FALLBACK_MODELS]
 
     def default_model(self) -> Optional[str]:
-        return self.model or DEFAULT_MODEL
+        return _resolve_model(None, self.model_override)
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
@@ -233,10 +282,11 @@ class MAIImageProvider(ImageGenProvider):
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
-        model = str(kwargs.get("model") or self.model or DEFAULT_MODEL)
+        api_key, endpoint = self._credentials()
+        model = _resolve_model(kwargs.get("model"), self.model_override)
         if not prompt:
             return _error(self.name, prompt, aspect, "Prompt is required", "invalid_input", model)
-        if not self.api_key or not self.endpoint:
+        if not api_key or not endpoint:
             return _error(self.name, prompt, aspect, f"Set {API_KEY_ENV} and {ENDPOINT_ENV}", "auth_required", model)
 
         sources = ([image_url] if image_url else []) + list(reference_image_urls or [])
@@ -250,8 +300,8 @@ class MAIImageProvider(ImageGenProvider):
             if sources:
                 name, data, content_type = _load_source(sources[0])
                 response = requests.post(
-                    f"{self.endpoint}/mai/v1/images/edits",
-                    headers={"api-key": self.api_key},
+                    f"{endpoint}/mai/v1/images/edits",
+                    headers={"api-key": api_key},
                     data={"model": model, "prompt": prompt},
                     files={"image": (name, data, content_type)},
                     timeout=REQUEST_TIMEOUT,
@@ -260,8 +310,8 @@ class MAIImageProvider(ImageGenProvider):
             else:
                 width, height = SIZES.get(aspect, SIZES["square"])
                 response = requests.post(
-                    f"{self.endpoint}/mai/v1/images/generations",
-                    headers={**_headers(self.api_key), "Content-Type": "application/json"},
+                    f"{endpoint}/mai/v1/images/generations",
+                    headers={**_headers(api_key), "Content-Type": "application/json"},
                     json={"model": model, "prompt": prompt, "width": width, "height": height},
                     timeout=REQUEST_TIMEOUT,
                 )
@@ -273,7 +323,9 @@ class MAIImageProvider(ImageGenProvider):
             return result
         except requests.RequestException as exc:
             logger.debug("MAI request failed", exc_info=True)
-            return _error(self.name, prompt, aspect, f"MAI request failed: {exc}", "api_error", model)
+            response = getattr(exc, "response", None)
+            message = _http_error_message(response, model) if response is not None else f"MAI request failed: {exc}"
+            return _error(self.name, prompt, aspect, message, "api_error", model)
         except Exception as exc:
             logger.debug("MAI image generation failed", exc_info=True)
             return _error(self.name, prompt, aspect, f"MAI image generation failed: {exc}", "io_error", model)
