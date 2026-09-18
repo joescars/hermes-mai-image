@@ -84,7 +84,7 @@ def test_generation_uses_mai_endpoint_and_api_key(monkeypatch):
 def test_edit_uses_multipart_image_upload(monkeypatch, tmp_path):
     provider = load_provider(monkeypatch)
     source = tmp_path / "source.png"
-    source.write_bytes(b"image")
+    source.write_bytes(b"\x89PNG\r\n\x1a\nimage")
     calls = {}
 
     class Response:
@@ -128,7 +128,7 @@ def test_remote_edit_uses_safe_bounded_download(monkeypatch):
 
     def safe_download(url, destination):
         calls.append((url, destination))
-        destination.write_bytes(b"remote image")
+        destination.write_bytes(b"\x89PNG\r\n\x1a\nremote image")
         return destination
 
     monkeypatch.setattr(provider, "_download_remote_image", safe_download)
@@ -136,8 +136,17 @@ def test_remote_edit_uses_safe_bounded_download(monkeypatch):
 
     assert calls[0][0] == "https://images.example/source.png"
     assert name == "source.png"
-    assert data == b"remote image"
+    assert data == b"\x89PNG\r\n\x1a\nremote image"
     assert content_type == "image/png"
+
+
+def test_source_validation_rejects_non_image(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    source = tmp_path / "not-an-image.png"
+    source.write_bytes(b"not image")
+
+    with pytest.raises(ValueError, match="not a supported image"):
+        provider._load_source(str(source))
 
 
 def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):

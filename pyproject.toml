@@ -4,11 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-mai-image"
-version = "0.1.0"
+version = "0.1.1"
 description = "Microsoft Foundry MAI image generation backend for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Hermes community" }]
+keywords = ["hermes-agent", "microsoft-foundry", "azure", "mai", "image-generation"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics",
+]
 dependencies = ["requests>=2.28"]
+
+[project.urls]
+Homepage = "https://github.com/joescars/hermes-mai-image"
+Repository = "https://github.com/joescars/hermes-mai-image"
+Issues = "https://github.com/joescars/hermes-mai-image/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
