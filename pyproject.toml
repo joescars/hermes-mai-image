@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-mai-image"
-version = "0.1.1"
+version = "0.1.2"
 description = "Microsoft Foundry MAI image generation backend for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.10"
