@@ -21,7 +21,7 @@ def load_provider(monkeypatch):
     image_provider.ImageGenProvider = ImageGenProvider
     image_provider.DEFAULT_ASPECT_RATIO = "square"
     image_provider.resolve_aspect_ratio = lambda value: value or "square"
-    image_provider.success_response = lambda **kwargs: {"success": True, **kwargs}
+    image_provider.success_response = lambda extra=None, **kwargs: {"success": True, **kwargs, **(extra or {})}
     image_provider.error_response = lambda **kwargs: {"success": False, **kwargs}
     image_provider.save_b64_image = lambda value, prefix, extension="png": Path(
         "/tmp", f"{prefix}.{extension}"
@@ -74,6 +74,8 @@ def test_generation_uses_mai_endpoint_and_api_key(monkeypatch):
     ).generate("a blue bird", "landscape")
 
     assert result["success"] is True
+    assert result["image"] == "file:///tmp/mai.png"
+    assert result["host_image"] == "/tmp/mai.png"
     assert calls["url"].endswith("/mai/v1/images/generations")
     assert calls["kwargs"]["headers"]["api-key"] == "key"
     assert calls["kwargs"]["json"] == {
@@ -104,6 +106,8 @@ def test_edit_uses_multipart_image_upload(monkeypatch, tmp_path):
     ).generate("make it brighter", "square", image_url=str(source))
 
     assert result["success"] is True
+    assert result["image"] == "file:///tmp/mai.png"
+    assert result["host_image"] == "/tmp/mai.png"
     assert calls["url"].endswith("/mai/v1/images/edits")
     assert calls["kwargs"]["data"] == {"model": "deployment", "prompt": "make it brighter"}
     assert calls["kwargs"]["files"]["image"][0] == "source.png"

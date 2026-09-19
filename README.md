@@ -186,7 +186,7 @@ prompt=<prompt>
 image=<file>
 ```
 
-The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Exactly one source image is supported for edits; additional references are rejected with a clear error. Generated base64 output is cached locally by Hermes.
+The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Exactly one source image is supported for edits; additional references are rejected with a clear error. Generated images remain in Hermes' `$HERMES_HOME/cache/images/`. Successful results expose the WebUI-facing `file://` URI in `image` and retain the absolute cached path in `host_image` for Hermes media delivery.
 
 ## Development
 

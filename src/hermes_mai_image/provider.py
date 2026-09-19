@@ -212,11 +212,13 @@ def _image_result(body: Any, *, provider: str, model: str, prompt: str, aspect: 
         return _error(provider, prompt, aspect, "MAI returned no image data", "empty_response", model)
     try:
         if first.get("b64_json"):
-            image = str(save_b64_image(first["b64_json"], prefix="mai", extension="png"))
+            saved_path = save_b64_image(first["b64_json"], prefix="mai", extension="png")
         elif first.get("url"):
-            image = str(save_url_image(first["url"], prefix="mai"))
+            saved_path = save_url_image(first["url"], prefix="mai")
         else:
             return _error(provider, prompt, aspect, "MAI response contained neither b64_json nor URL", "empty_response", model)
+        host_image = str(saved_path)
+        image = saved_path.resolve().as_uri()
     except Exception as exc:
         return _error(provider, prompt, aspect, f"Could not save MAI image: {exc}", "io_error", model)
     return success_response(
@@ -226,6 +228,7 @@ def _image_result(body: Any, *, provider: str, model: str, prompt: str, aspect: 
         aspect_ratio=aspect,
         provider=provider,
         modality="image",
+        extra={"host_image": host_image},
     )
 
 
