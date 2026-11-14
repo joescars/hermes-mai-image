@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -50,7 +52,90 @@ def test_discovery_parses_models_response(monkeypatch):
     monkeypatch.setattr(provider.requests, "get", lambda *args, **kwargs: Response())
     models = provider.discover_models("https://example.services.ai.azure.com", "key")
 
-    assert models == [{"id": "deployment-flash", "display": "Flash deployment"}]
+    assert models == [{"id": "deployment-flash", "display": "Flash deployment (unverified: may not be an image model)"}]
+
+
+def test_discovery_non_json_body_returns_empty(monkeypatch):
+    provider = load_provider(monkeypatch)
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise json.JSONDecodeError("bad", "<html>", 0)
+
+    monkeypatch.setattr(provider.requests, "get", lambda *args, **kwargs: Response())
+    assert provider.discover_models("https://example.services.ai.azure.com", "key") == []
+
+
+def test_discovery_labels_unrecognised_models_as_unverified(monkeypatch):
+    provider = load_provider(monkeypatch)
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": "chat-gpt", "name": "Chat"}, {"id": "MAI-Image-2.5"}]}
+
+    monkeypatch.setattr(provider.requests, "get", lambda *args, **kwargs: Response())
+    models = provider.discover_models("https://example", "key")
+    assert [m["id"] for m in models] == ["chat-gpt", "MAI-Image-2.5"]
+    assert "unverified" in models[0]["display"]
+    assert models[1]["display"] == "MAI-Image-2.5"
+
+
+def test_discovery_network_error_returns_empty(monkeypatch):
+    provider = load_provider(monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise provider.requests.ConnectionError("down")
+
+    monkeypatch.setattr(provider.requests, "get", boom)
+    assert provider.discover_models("https://example", "key") == []
+
+
+def test_default_model_is_in_fallback_catalog(monkeypatch):
+    provider = load_provider(monkeypatch)
+    assert provider.DEFAULT_MODEL == "MAI-Image-2.5"
+    assert provider.DEFAULT_MODEL in provider.FALLBACK_MODELS
+
+
+def test_generation_retries_rate_limit_and_server_errors(monkeypatch):
+    provider = load_provider(monkeypatch)
+    responses = []
+    class Response:
+        def __init__(self, status):
+            self.status_code = status
+            self.headers = {"Retry-After": "3"} if status == 429 else {}
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise provider.requests.HTTPError(response=self)
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
+    responses.extend([Response(500), Response(429), Response(200)])
+    sleeps = []
+    monkeypatch.setattr(provider.time, "sleep", sleeps.append)
+    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: responses.pop(0))
+    result = provider.MAIImageProvider(api_key="key", endpoint="https://example", model="m").generate("cat")
+    assert result["success"] is True
+    assert sleeps == [1, 3]  # exponential backoff, then Retry-After
+
+
+def test_generation_retries_stop_at_max(monkeypatch):
+    provider = load_provider(monkeypatch)
+    class Response:
+        status_code = 503
+        headers = {}
+        def raise_for_status(self):
+            raise provider.requests.HTTPError(response=self)
+    calls = []
+    monkeypatch.setattr(provider.time, "sleep", lambda _: None)
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: (calls.append(1) or Response()))
+    result = provider.MAIImageProvider(api_key="key", endpoint="https://example", model="m").generate("cat")
+    assert result["success"] is False
+    assert len(calls) == 3
 
 
 def test_generation_uses_mai_endpoint_and_api_key(monkeypatch):
@@ -219,3 +304,146 @@ def test_missing_credentials_returns_auth_error(monkeypatch):
     result = provider.MAIImageProvider(api_key="", endpoint="", model="deployment").generate("cat")
     assert result["success"] is False
     assert result["error_type"] == "auth_required"
+
+
+def test_remote_download_blocks_unsafe_address(monkeypatch, tmp_path):
+    """A URL Hermes' URL-safety policy rejects must not be fetched at all."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: False)
+    fetched = []
+
+    def fake_get(*args, **kwargs):
+        fetched.append(args)
+        raise AssertionError("unsafe URL must not be requested")
+
+    monkeypatch.setattr(provider.requests, "get", fake_get)
+    with pytest.raises(ValueError, match="private, internal or blocked"):
+        provider._download_remote_image("http://169.254.169.254/latest/meta-data", tmp_path / "x")
+    assert fetched == []
+
+
+def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
+    """An oversized stream is aborted before the body is buffered in full."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+
+    class Response:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def iter_content(self, chunk_size):
+            for _ in range(6):
+                yield b"x" * (10 * 1024 * 1024)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
+    with pytest.raises(ValueError, match="byte limit"):
+        provider._download_remote_image("https://images.example/big.png", tmp_path / "big")
+
+
+def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
+    """A public URL that returns a non-image body is rejected by magic-byte sniffing."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+
+    class Response:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+
+        def iter_content(self, chunk_size):
+            yield b"<html>not an image</html>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
+    with pytest.raises(ValueError, match="not a supported image"):
+        provider._download_remote_image("https://images.example/page.html", tmp_path / "p")
+
+
+def _load_manifest():
+    """Parse the plugin manifest with a real YAML parser (declared test dependency)."""
+    import yaml
+
+    return yaml.safe_load((ROOT / "src" / "hermes_mai_image" / "plugin.yaml").read_text())
+
+
+def test_manifest_version_matches_project_version():
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    manifest = _load_manifest()
+
+    assert manifest["version"] == project["project"]["version"]
+
+def test_manifest_parses_with_required_catalog_fields():
+    manifest = _load_manifest()
+    assert {"name", "version", "description", "author", "license", "requires_hermes", "capabilities"} <= manifest.keys()
+    assert manifest["author"] == "joescars"
+    assert manifest.get("kind") != "backend"
+    assert manifest["capabilities"] == {
+        "provides_tools": [],
+        "provides_hooks": [],
+        "provides_middleware": [],
+    }
+
+def test_setting_uses_hermes_secret_without_consulting_environment(monkeypatch):
+    secret_scope = ModuleType("agent.secret_scope")
+    secret_scope.get_secret = lambda name: "scoped-key" if name == "MAI_FOUNDRY_API_KEY" else None
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", secret_scope)
+    provider = load_provider(monkeypatch)
+
+    def environment_must_not_be_consulted(*args, **kwargs):
+        raise AssertionError("environment fallback was consulted")
+
+    monkeypatch.setattr(provider.os.environ, "get", environment_must_not_be_consulted)
+    assert provider._setting(provider.API_KEY_ENV) == "scoped-key"
+
+def test_setting_falls_back_to_environment_without_hermes(monkeypatch):
+    monkeypatch.delenv("MAI_FOUNDRY_API_KEY", raising=False)
+    provider = load_provider(monkeypatch)
+    monkeypatch.setenv("MAI_FOUNDRY_API_KEY", "environment-key")
+    assert provider._setting(provider.API_KEY_ENV) == "environment-key"
+
+
+def test_ssrf_guard_blocks_private_and_metadata_addresses(monkeypatch):
+    """The self-contained guard must reject loopback, private and metadata addresses."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "is_safe_url", None)
+
+    for blocked in [
+        "http://169.254.169.254/latest/meta-data/",
+        "http://127.0.0.1/x.png",
+        "http://localhost/x.png",
+        "https://10.0.0.5/x.png",
+        "http://192.168.1.10/x.png",
+        "http://[::1]/x.png",
+        "ftp://example.com/x.png",
+    ]:
+        assert provider._source_url_is_safe(blocked) is False, blocked
+
+    assert provider._source_url_is_safe("https://8.8.8.8/x.png") is True
+
+
+def test_ssrf_guard_fails_closed_when_hermes_policy_raises(monkeypatch):
+    """A broken Hermes policy must deny, never silently allow."""
+    provider = load_provider(monkeypatch)
+
+    def boom(url):
+        raise RuntimeError("policy unavailable")
+
+    monkeypatch.setattr(provider, "is_safe_url", boom)
+    assert provider._source_url_is_safe("https://images.example/a.png") is False
