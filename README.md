@@ -257,7 +257,7 @@ This section is the plugin's [catalog rule 13](https://github.com/NousResearch/h
 
 Source images are the one place this plugin handles untrusted input. Remote references are fetched with `requests` behind an explicit SSRF policy rather than being handed to the HTTP client unexamined. Local file reads are additionally checked against Hermes' file-safety rules.
 
-- **Scheme allowlist.** Only `http`/`https` source references are fetched; anything else is refused.
+- **Scheme allowlist.** Only `https` source references are fetched; anything else is refused.
 - **Address checks.** The host is resolved and every returned address must be public; loopback, private, link-local, reserved and multicast ranges are refused, and the cloud metadata address is blocked regardless of settings. When Hermes' own `tools.url_safety` policy is importable it is used in preference to the built-in check.
 - **Redirects are not followed.** A redirecting source response raises instead of being followed, so a public URL cannot bounce into an internal address.
 - **Byte caps.** A downloaded source image is capped at 50 MiB (`MAX_REMOTE_IMAGE_BYTES`) enforced while streaming, so an oversized body is aborted rather than buffered; the same limit applies to local source files.

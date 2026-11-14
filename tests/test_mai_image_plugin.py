@@ -432,6 +432,7 @@ def test_ssrf_guard_blocks_private_and_metadata_addresses(monkeypatch):
         "http://192.168.1.10/x.png",
         "http://[::1]/x.png",
         "ftp://example.com/x.png",
+        "http://8.8.8.8/x.png",
     ]:
         assert provider._source_url_is_safe(blocked) is False, blocked
 
