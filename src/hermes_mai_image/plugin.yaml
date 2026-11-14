@@ -1,8 +1,21 @@
 name: azure-mai-image
-version: 0.1.0
-description: "Microsoft Foundry MAI image generation and image editing backend."
-author: Hermes community
-kind: backend
+version: 0.1.2
+description: "Microsoft Foundry MAI image generation and editing provider for Hermes Agent."
+author: joescars
+requires_hermes: ">=0.21.6"
+license: MIT
+homepage: https://github.com/joescars/hermes-mai-image
+capabilities:
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
 requires_env:
   - MAI_FOUNDRY_API_KEY
   - MAI_FOUNDRY_ENDPOINT
+config_schema:
+  MAI_FOUNDRY_API_KEY:
+    type: secret
+    required: true
+  MAI_FOUNDRY_ENDPOINT:
+    type: secret
+    required: true

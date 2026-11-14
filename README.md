@@ -21,14 +21,26 @@ Use the resource root as the endpoint. Do **not** append `/mai/v1`; the plugin a
 
 ### 2. Install the plugin into Hermes
 
-For a standard Hermes installation:
+Two paths install the same plugin. Prefer the catalog install; fall back to the Git install when you want the moving branch.
+
+**Catalog install (recommended).** Once this plugin is listed in the Hermes plugin catalog:
+
+```bash
+hermes plugins install mai-image
+```
+
+The catalog entry pins an exact 40-character commit SHA that has been validated and reviewed for the catalog. Installs clone the repository and check out precisely that commit, so a catalog install is reproducible and does not move until you run `hermes plugins update mai-image` (which adopts a newly reviewed pin). Use this path for a stable, vetted plugin.
+
+**Git install (tracks the branch).** To run the current development code instead of a pinned release:
 
 ```bash
 /usr/local/lib/hermes-agent/venv/bin/pip install --upgrade \\
   "git+https://github.com/joescars/hermes-mai-image.git"
 ```
 
-Verify the package is visible:
+The Git install tracks the branch, so `--upgrade` picks up the newest commits. A catalog install is pinned and validated; a Git install is live and unreviewed. Use the catalog install unless you specifically want unreleased changes.
+
+Verify the package is visible either way:
 
 ```bash
 hermes plugins list
@@ -89,6 +101,10 @@ The Web UI uses the provider's setup schema and saves credentials in the active 
 MAI_FOUNDRY_API_KEY
 MAI_FOUNDRY_ENDPOINT
 ```
+
+**Credential handling.** The plugin reads `MAI_FOUNDRY_API_KEY` and `MAI_FOUNDRY_ENDPOINT` through Hermes secret scope for the **active profile** — the values are resolved in the context of the profile that is running, so a second profile cannot pick them up accidentally. The values live in the active profile's `.env` under `$HERMES_HOME/profiles/<profile>/.env` (the default profile's `.env` sits at `$HERMES_HOME/.env`). The API key is sent to your Foundry resource in the `api-key` header on each request and is never logged, never written by the plugin anywhere else, and never included in image metadata.
+
+Never put API keys in `config.yaml`, chat messages, or Git. `config.yaml` holds only non-secret model selection, not credentials.
 
 If the provider does not appear, restart the dashboard after installing the package. A browser refresh alone does not reload Python plugins.
 
@@ -164,7 +180,36 @@ The edit request uses MAI's `/mai/v1/images/edits` multipart endpoint.
 - Image-to-image editing through `/mai/v1/images/edits`
 - Landscape, square, and portrait dimensions
 - Stable local output files under `$HERMES_HOME/cache/images/`
-- Installable from GitHub now and publishable to PyPI later
+- Installable from the Hermes plugin catalog (pinned SHA) or directly from GitHub
+
+## Model discovery
+
+The provider discovers the models available on your Foundry resource at runtime by calling the resource's `/models` route:
+
+```text
+GET {endpoint}/models
+api-key: ***
+```
+
+The response is read for a `data` array (or a `models` array) of entries; each entry's `id`/`name`/`model` becomes the model id and `display_name`/`name` becomes the label. Discovery is best-effort — not every Foundry resource exposes `/models`, and MAI generation itself does not require it.
+
+When discovery is unavailable, returns nothing, or fails, the provider falls back to a built-in MAI catalog:
+
+```text
+MAI-Image-2.6-Flash
+MAI-Image-2.6
+MAI-Image-2.5-Pro
+MAI-Image-2.5-Flash
+MAI-Image-2.5
+```
+
+**Overriding the discovery path.** Set `MAI_FOUNDRY_MODELS_PATH` to point discovery at a different route on the same resource. A value without a leading `/` is normalised by adding one:
+
+```dotenv
+MAI_FOUNDRY_MODELS_PATH=/models
+```
+
+The model actually sent to MAI is resolved in this order: an explicit per-request model, then `MAI_IMAGE_MODEL` from the active profile's `.env`, then the model set in `config.yaml` (`image_gen.model` or `image_gen.azure-mai.model`), then the `MAI-Image-2.5` default. The discovered list feeds the picker; it does not change which deployment name is sent unless you pick one.
 
 ## API behavior
 
@@ -187,6 +232,38 @@ image=<file>
 ```
 
 The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Exactly one source image is supported for edits; additional references are rejected with a clear error. Generated images remain in Hermes' `$HERMES_HOME/cache/images/`. Successful results expose the WebUI-facing `file://` URI in `image` and retain the absolute cached path in `host_image` for Hermes media delivery.
+
+## Disclosure
+
+This section is the plugin's [catalog rule 13](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md) disclosure — what the plugin does that you should know before installing it.
+
+- **Network destination.** Your prompt, the optional source image (for edits), and your `MAI_FOUNDRY_API_KEY` are sent over **https** to **your own Microsoft Azure AI Foundry resource** — the endpoint you configure in `MAI_FOUNDRY_ENDPOINT`. The plugin talks to no other host. The API key travels only in the `api-key` header on requests to that resource.
+- **Billing.** Every generation and edit calls your Foundry deployment and **bills your Azure subscription** for that deployment. There is **no Hermes approval prompt before spending** — the plugin does not gate on cost and does not know MAI pricing. Your Azure quota and rate limits are the only backstop.
+- **Local writes.** Returned images are downloaded and written into the Hermes image cache under `$HERMES_HOME/cache/images/`. Nothing is written outside that cache and the plugin's own working directory.
+- **No telemetry.** The plugin reports no usage, analytics, or diagnostics anywhere.
+- **No shell commands.** It never runs a subprocess or shell command.
+- **No background processes.** It makes synchronous HTTP requests and starts no daemons, timers, or watchers.
+- **No self-updates.** The plugin does not fetch or replace its own files. Catalog updates arrive only through a reviewed SHA-bump in the catalog plus `hermes plugins update mai-image`.
+- **No extra dependencies.** The only runtime dependency is `requests` (plus Hermes itself).
+
+## Compatibility
+
+- **Hermes floor:** `requires_hermes: ">=0.21.6"`. The plugin uses image-gen provider APIs that require a Hermes at or above this version.
+- **Where it is declared:** in `plugin.yaml` (`requires_hermes`) inside the package, **and** in the catalog entry (`catalog/mai-image.yaml`, `requires_hermes`), so both the loader and the catalog enforce the same floor.
+- **Install behaviour:** an install by catalog name refuses on an older Hermes, and `hermes plugins update` keeps an installed copy at its current pin until Hermes is updated.
+- **Python:** 3.10 or newer (`requires-python = ">=3.10"`).
+
+## Security behaviour
+
+Source images are the one place this plugin handles untrusted input. Remote references are fetched with `requests` behind an explicit SSRF policy rather than being handed to the HTTP client unexamined. Local file reads are additionally checked against Hermes' file-safety rules.
+
+- **Scheme allowlist.** Only `http`/`https` source references are fetched; anything else is refused.
+- **Address checks.** The host is resolved and every returned address must be public; loopback, private, link-local, reserved and multicast ranges are refused, and the cloud metadata address is blocked regardless of settings. When Hermes' own `tools.url_safety` policy is importable it is used in preference to the built-in check.
+- **Redirects are not followed.** A redirecting source response raises instead of being followed, so a public URL cannot bounce into an internal address.
+- **Byte caps.** A downloaded source image is capped at 50 MiB (`MAX_REMOTE_IMAGE_BYTES`) enforced while streaming, so an oversized body is aborted rather than buffered; the same limit applies to local source files.
+- **Content sniffing.** The source is validated by magic bytes (PNG, JPEG, GIF, WebP) and the authoritative MIME type is taken from the file content, not from the file extension or a caller-supplied type. Non-images are rejected.
+- **Exactly one reference image.** MAI editing takes a single source image. Zero or one is accepted; two or more are rejected with a `too_many_references` error before any request is sent.
+- **Width and height constraints.** Generation uses fixed MAI presets — landscape `1536x1024`, square `1024x1024`, portrait `1024x1536` — chosen from the resolved aspect ratio. There is no free-form width/height input.
 
 ## Development
 

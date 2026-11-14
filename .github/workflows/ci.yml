@@ -29,3 +29,33 @@ jobs:
         run: python -m compileall -q src tests
       - name: Build wheel
         run: python -m pip wheel --no-deps --wheel-dir dist .
+
+  catalog-validation:
+    # Validates the plugin against Hermes' own plugin validator, which is the gate the
+    # Hermes plugin catalog applies. Hermes must be installed for this to run, so it is a
+    # separate job that pins a Hermes version rather than pulling it into the test matrix.
+    #
+    # The plugin manifest lives at src/hermes_mai_image/plugin.yaml, so the validator must
+    # target that directory. Validating the repository root fails with
+    # "no plugin.yaml (or portable plugin.json) in the plugin directory".
+    #
+    # Reproduce locally with the Hermes CLI on PATH:
+    #   hermes plugins validate src/hermes_mai_image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Hermes (pinned release tag)
+        # Pinned so catalog validation is deterministic; bump deliberately. Hermes is not
+        # installable from PyPI (the published hermes-agent is stale) and refuses wheel
+        # builds, so clone the release tag and install it editable, as Hermes itself does.
+        env:
+          HERMES_REF: v2026.9.24
+        run: |
+          git clone --depth 1 --branch "$HERMES_REF" https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
+          python -m pip install -e "$RUNNER_TEMP/hermes-agent"
+      - name: Validate plugin manifest
+        run: hermes plugins validate src/hermes_mai_image

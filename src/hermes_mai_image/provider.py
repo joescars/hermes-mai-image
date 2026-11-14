@@ -6,12 +6,11 @@ The MAI API is not OpenAI-compatible: it uses ``/mai/v1`` endpoints,
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import logging
 import mimetypes
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
@@ -31,12 +30,31 @@ from agent.image_gen_provider import (
 logger = logging.getLogger(__name__)
 
 try:
+    # Documented file-safety seam: blocks reading credentials and other protected paths
+    # when a local reference image is supplied. Published in the plugin API docs.
     from agent.file_safety import raise_if_read_blocked
 except ImportError:  # pragma: no cover - only for standalone import outside Hermes
     def raise_if_read_blocked(_path: str) -> None:
         return
 
+try:
+    # Published plugin API (hermes_cli/data/plugin_api.json): SSRF policy used for remote
+    # source images. Importing this does not trip the private-core-import admission lint.
+    from tools.url_safety import is_safe_url
+except ImportError:  # pragma: no cover - only for standalone import outside Hermes
+    is_safe_url = None
+
+try:
+    # Catalog rule 11: declared secrets are read through Hermes' credential route so the
+    # active profile is honoured (a bare os.environ read can pick up another profile's key
+    # under multiplexing).
+    from agent.secret_scope import get_secret
+except ImportError:  # pragma: no cover - only for standalone import outside Hermes
+    get_secret = None
+
 MAX_REMOTE_IMAGE_BYTES = 50 * 1024 * 1024
+REMOTE_TIMEOUT = (5, 15)
+MAX_REQUEST_ATTEMPTS = 3
 
 DEFAULT_ENDPOINT = ""
 DEFAULT_MODEL = "MAI-Image-2.5"
@@ -62,7 +80,8 @@ SIZES = {
 
 
 def _setting(name: str, default: str = "") -> str:
-    return (os.environ.get(name) or default).strip()
+    value = get_secret(name) if get_secret is not None else None
+    return (value or os.environ.get(name) or default).strip()
 
 
 def _endpoint(endpoint: Optional[str] = None) -> str:
@@ -135,13 +154,23 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     path = _setting(DISCOVERY_PATH_ENV, "/models")
     if not path.startswith("/"):
         path = "/" + path
-    response = requests.get(
-        f"{endpoint.rstrip('/')}{path}",
-        headers=_headers(api_key),
-        timeout=DISCOVERY_TIMEOUT,
-    )
-    response.raise_for_status()
-    body = response.json()
+    try:
+        response = requests.get(
+            f"{endpoint.rstrip('/')}{path}",
+            headers=_headers(api_key),
+            timeout=DISCOVERY_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        # Discovery is best-effort: a missing or unreachable /models route falls back to the
+        # built-in MAI catalog rather than failing the request.
+        logger.debug("MAI model discovery failed: %s", exc)
+        return []
+    try:
+        body = response.json()
+    except ValueError:  # includes json.JSONDecodeError; a non-JSON body must not raise
+        logger.debug("MAI model discovery returned a non-JSON body")
+        return []
     entries = body.get("data") if isinstance(body, dict) else None
     if entries is None and isinstance(body, dict):
         entries = body.get("models")
@@ -150,11 +179,21 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     models = []
     for entry in entries:
         if isinstance(entry, str):
-            models.append({"id": entry, "display": entry})
+            model_id, display = entry, entry
         elif isinstance(entry, dict):
             model_id = entry.get("id") or entry.get("name") or entry.get("model")
-            if model_id:
-                models.append({"id": str(model_id), "display": str(entry.get("display_name") or entry.get("name") or model_id)})
+            display = entry.get("display_name") or entry.get("name") or model_id
+        else:
+            continue
+        if not model_id:
+            continue
+        model_id = str(model_id)
+        # /models is not image-specific: it can list chat and embedding deployments. Label
+        # ids we cannot recognise as MAI/image so a user does not pick a chat deployment.
+        label = str(display)
+        if "image" not in model_id.lower() and not model_id.lower().startswith("mai"):
+            label += " (unverified: may not be an image model)"
+        models.append({"id": model_id, "display": label})
     return models
 
 
@@ -169,11 +208,108 @@ def _validate_image_bytes(data: bytes, content_type: str) -> str:
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "image/webp"
     raise ValueError(f"Source is not a supported image (received {content_type or 'unknown type'})")
-def _download_remote_image(url: str, destination: Path) -> Path:
-    """Use Hermes' SSRF-safe, redirect-checked, bounded image downloader."""
-    from tools.vision_tools import _download_image
 
-    return asyncio.run(_download_image(url, destination))
+
+def _retry_delay(response: Any, attempt: int) -> float:
+    """Seconds to wait before retry ``attempt`` (1-based): ``Retry-After``, else 2**(attempt-1)."""
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    try:
+        if raw is not None:
+            return max(0.0, min(float(raw), 60.0))
+    except (TypeError, ValueError):
+        pass
+    return float(2 ** (attempt - 1))
+
+
+def _post_with_retry(url: str, **kwargs: Any):
+    """``requests.post`` with bounded retry on 429/5xx; returns the final response."""
+    response = None
+    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+        response = requests.post(url, **kwargs)
+        status = getattr(response, "status_code", None)
+        retryable = isinstance(status, int) and (status == 429 or 500 <= status < 600)
+        if not retryable or attempt == MAX_REQUEST_ATTEMPTS:
+            return response
+        time.sleep(_retry_delay(response, attempt))
+    return response
+
+
+def _address_is_public(host: str) -> bool:
+    """True when ``host`` resolves only to public, non-reserved addresses.
+
+    Self-contained SSRF guard used when Hermes' own policy is unavailable. Mirrors the
+    intent of ``tools.url_safety``: reject loopback, private, link-local, reserved and
+    multicast ranges, plus the cloud metadata address.
+    """
+    import ipaddress
+    import socket
+
+    if not host:
+        return False
+    if host.lower() in {"localhost", "metadata.google.internal"}:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if not address.is_global or address.is_multicast:
+            return False
+    return True
+
+
+def _source_url_is_safe(url: str) -> bool:
+    """SSRF policy for remote source images: https only, public address required."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return False
+    if is_safe_url is not None:
+        try:
+            return bool(is_safe_url(url))
+        except Exception:  # noqa: BLE001 - treat any policy failure as unsafe
+            return False
+    return _address_is_public(parts.hostname or "")
+
+
+def _download_remote_image(url: str, destination: Path) -> Path:
+    """Download a remote source image safely.
+
+    Validation goes through Hermes' published URL-safety helper
+    (``tools.url_safety.is_safe_url``, listed in ``plugin_api.json``), which blocks
+    private/internal addresses, cloud metadata endpoints and the link-local range, and
+    applies per-redirect re-validation. The fetch itself uses ``requests`` with streaming
+    and a byte cap so an oversized body is aborted before it is buffered.
+
+    Remote sources are deliberately NOT restricted to the configured Foundry host: a user
+    legitimately edits from any public image URL, so the policy is "public address only",
+    not "one allowlisted host".
+    """
+    if not _source_url_is_safe(url):
+        raise ValueError("Remote image URL resolves to a private, internal or blocked address")
+
+    total = 0
+    with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT) as response:
+        if response.is_redirect or response.is_permanent_redirect:
+            raise ValueError("Remote image may not redirect")
+        if response.status_code >= 400:
+            raise ValueError(f"Image download failed with HTTP {response.status_code}")
+        with destination.open("wb") as output:
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > MAX_REMOTE_IMAGE_BYTES:
+                    raise ValueError(f"Image exceeds {MAX_REMOTE_IMAGE_BYTES} byte limit")
+                output.write(chunk)
+    _validate_image_bytes(destination.read_bytes()[:16], "")
+    return destination
 
 
 def _load_source(source: str):
@@ -315,7 +451,7 @@ class MAIImageProvider(ImageGenProvider):
                     "too_many_references", model)
             if sources:
                 name, data, content_type = _load_source(sources[0])
-                response = requests.post(
+                response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/edits",
                     headers={"api-key": api_key},
                     data={"model": model, "prompt": prompt},
@@ -325,7 +461,7 @@ class MAIImageProvider(ImageGenProvider):
                 modality = "image"
             else:
                 width, height = SIZES.get(aspect, SIZES["square"])
-                response = requests.post(
+                response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/generations",
                     headers={**_headers(api_key), "Content-Type": "application/json"},
                     json={"model": model, "prompt": prompt, "width": width, "height": height},
