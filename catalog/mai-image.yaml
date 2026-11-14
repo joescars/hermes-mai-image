@@ -2,11 +2,12 @@
 # NOT submitted to NousResearch/hermes-agent. Submission requires the
 # repository owner's explicit approval.
 #
-# TODO(re-pin): `sha` below is set to the current HEAD of the docs branch so the
-# draft parses and validates locally. It MUST be re-pinned to the exact release
-# commit (the merged commit of the version being published) before submission —
-# the catalog installs clone the repo and check out exactly this commit, so a
-# stale pin ships unreleased code.
+# TODO(re-pin): `sha` MUST be re-pinned to the commit being published before submission.
+# The catalog clones the repo and checks out exactly this commit, so a stale pin ships
+# the wrong code. It currently points at the last commit on main, which does NOT yet
+# contain the catalog-hardening work in this branch — set it to the merge commit of the
+# release that carries that work. Verify with:
+#   git rev-parse <merged-commit>   # must be 40 hex chars and contain this entry's version
 
 name: mai-image
 title: Microsoft Foundry MAI image generation
