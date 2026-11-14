@@ -268,7 +268,7 @@ def _address_is_public(host: str) -> bool:
 def _source_url_is_safe(url: str) -> bool:
     """SSRF policy for remote source images: https only, public address required."""
     parts = urlsplit(url)
-    if parts.scheme not in ("http", "https"):
+    if parts.scheme != "https":
         return False
     if is_safe_url is not None:
         try:
