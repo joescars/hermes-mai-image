@@ -30,6 +30,16 @@ from agent.image_gen_provider import (
 logger = logging.getLogger(__name__)
 
 try:
+    # Private core import, deliberately retained (catalog rule 9). `agent.file_safety` is not
+    # listed in hermes_cli/data/plugin_api.json, so `hermes plugins validate` warns here; the
+    # warning is correct about the coupling and is documented in README "Validation" and in
+    # issue #7. Retained because raise_if_read_blocked is the shared chokepoint Hermes' own
+    # bundled providers use for local-path input loading -- the same import appears in
+    # plugins/image_gen/{xai,openai,openai-codex,krea,openrouter} and plugins/video_gen/xai --
+    # and it has no public equivalent. Dropping it would remove the guard that stops a local
+    # reference image from reading a credential store. Tracked upstream at
+    # NousResearch/hermes-agent#155704 (request to publish a public seam for this and for
+    # image fetching).
     # Documented file-safety seam: blocks reading credentials and other protected paths
     # when a local reference image is supplied. Published in the plugin API docs.
     from agent.file_safety import raise_if_read_blocked
@@ -283,9 +293,13 @@ def _download_remote_image(url: str, destination: Path) -> Path:
 
     Validation goes through Hermes' published URL-safety helper
     (``tools.url_safety.is_safe_url``, listed in ``plugin_api.json``), which blocks
-    private/internal addresses, cloud metadata endpoints and the link-local range, and
-    applies per-redirect re-validation. The fetch itself uses ``requests`` with streaming
-    and a byte cap so an oversized body is aborted before it is buffered.
+    private/internal addresses, cloud metadata endpoints and the link-local range. The fetch
+    itself uses ``requests`` with streaming and a byte cap so an oversized body is aborted
+    before it is buffered.
+
+    Redirects are refused outright rather than followed and re-validated: following a
+    redirect is exactly how a public URL can bounce into an internal address, and a source
+    image never legitimately needs one. The response's Location is never dereferenced.
 
     Remote sources are deliberately NOT restricted to the configured Foundry host: a user
     legitimately edits from any public image URL, so the policy is "public address only",
@@ -330,7 +344,7 @@ def _load_source(source: str):
         return filename, data, content_type
 
     path = Path(source).expanduser()
-    raise_if_read_blocked(str(path))
+    raise_if_read_blocked(str(path))  # credential-read guard before local bytes (see import site)
     if not path.is_file():
         raise FileNotFoundError(source)
     data = path.read_bytes()

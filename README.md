@@ -276,6 +276,21 @@ pytest -q
 
 The tests mock HTTP responses and never require an Azure key.
 
+## Validation
+
+`hermes plugins validate src/hermes_mai_image` passes. It reports one warning, which is understood and accepted:
+
+```
+⚠ private core imports (catalog rule 9: public surfaces only; these can break on
+any release): provider.py:45 agent.file_safety.raise_if_read_blocked
+```
+
+**Why it is accepted.** `raise_if_read_blocked` is the shared chokepoint Hermes itself uses for local-path input loading; the same import appears in Hermes' own bundled providers (`plugins/image_gen/{xai,openai,openai-codex,krea,openrouter}` and `plugins/video_gen/xai`). It is what stops a local reference image from reading a credential store or a protected path, and there is no public equivalent for it. Dropping the import to silence the warning would remove that guard — a worse outcome than the warning.
+
+The warning fires because `agent.file_safety` is not listed in `hermes_cli/data/plugin_api.json`, which is the allowlist the lint consults. A request to publish a public seam for this (and for image fetching, where no public download API exists at all) is filed upstream at [NousResearch/hermes-agent#155704](https://github.com/NousResearch/hermes-agent/issues/155704); if it lands, the import is replaced and the warning disappears.
+
+The other private import originally flagged — `tools.vision_tools._download_image` — **has been removed**: the plugin now fetches source images itself behind the published `tools.url_safety.is_safe_url` policy. The redirect guard, byte cap and magic-byte sniffing are covered by tests, including a test asserting a redirect's `Location` is never dereferenced.
+
 ## Microsoft documentation
 
 - [Deploy and use MAI image models in Microsoft Foundry](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-mai-image)

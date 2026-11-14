@@ -322,6 +322,56 @@ def test_remote_download_blocks_unsafe_address(monkeypatch, tmp_path):
     assert fetched == []
 
 
+def test_remote_download_rejects_redirect(monkeypatch, tmp_path):
+    """A redirecting source must be refused, not followed into a second address.
+
+    Following a redirect is how a public URL bounces into an internal one, so the
+    Location header must never be dereferenced.
+    """
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+
+    class RedirectingResponse:
+        status_code = 302
+        is_redirect = True
+        is_permanent_redirect = False
+        headers = {"Location": "http://169.254.169.254/latest/meta-data/"}
+
+        def iter_content(self, chunk_size):
+            raise AssertionError("a redirecting response must not be streamed")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    calls = []
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(url)
+        return RedirectingResponse()
+
+    monkeypatch.setattr(provider.requests, "get", fake_get)
+    with pytest.raises(ValueError, match="may not redirect"):
+        provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+    # Only the original URL was requested; the Location was never fetched.
+    assert calls == ["https://images.example/r.png"]
+
+
+def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
+    """Plain HTTP is refused even for a public address (HTTPS-only policy)."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "is_safe_url", None)
+    fetched = []
+    monkeypatch.setattr(
+        provider.requests, "get", lambda *a, **k: fetched.append(a) or (_ for _ in ()).throw(AssertionError)
+    )
+    with pytest.raises(ValueError, match="private, internal or blocked"):
+        provider._download_remote_image("http://8.8.8.8/x.png", tmp_path / "h")
+    assert fetched == []
+
+
 def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
     """An oversized stream is aborted before the body is buffered in full."""
     provider = load_provider(monkeypatch)
