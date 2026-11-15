@@ -265,7 +265,7 @@ def test_edit_uses_multipart_image_upload(monkeypatch, tmp_path):
     assert result["host_image"] == "/tmp/mai.png"
     assert calls["url"].endswith("/mai/v1/images/edits")
     assert calls["kwargs"]["data"] == {"model": "deployment", "prompt": "make it brighter"}
-    assert calls["kwargs"]["files"]["image"][0] == "source.png"
+    assert calls["kwargs"]["files"] == [("image", ("source.png", b"\x89PNG\r\n\x1a\nimage", "image/png"))]
 
 
 def test_edit_blocks_credential_path(monkeypatch, tmp_path):
@@ -285,15 +285,14 @@ def test_remote_edit_uses_safe_bounded_download(monkeypatch):
     provider = load_provider(monkeypatch)
     calls = []
 
-    def safe_download(url, destination):
-        calls.append((url, destination))
-        destination.write_bytes(b"\x89PNG\r\n\x1a\nremote image")
-        return destination
+    def safe_download(url):
+        calls.append(url)
+        return b"\x89PNG\r\n\x1a\nremote image"
 
     monkeypatch.setattr(provider, "_download_remote_image", safe_download)
     name, data, content_type = provider._load_source("https://images.example/source.png")
 
-    assert calls[0][0] == "https://images.example/source.png"
+    assert calls[0] == "https://images.example/source.png"
     assert name == "source.png"
     assert data == b"\x89PNG\r\n\x1a\nremote image"
     assert content_type == "image/png"
@@ -336,24 +335,6 @@ def test_edit_rejects_gif_and_webp_without_posting(monkeypatch, tmp_path, name, 
 def test_source_validation_accepts_jpeg(monkeypatch):
     provider = load_provider(monkeypatch)
     assert provider._validate_image_bytes(b"\xff\xd8\xff\xe0data", "") == "image/jpeg"
-
-
-def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):
-    provider = load_provider(monkeypatch)
-    first = tmp_path / "first.png"
-    second = tmp_path / "second.png"
-    first.write_bytes(b"image")
-    second.write_bytes(b"image")
-
-    called = []
-    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: called.append(1))
-    result = provider.MAIImageProvider(
-        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
-    ).generate("edit", "square", image_url=str(first), reference_image_urls=[str(second)])
-
-    assert result["success"] is False
-    assert result["error_type"] == "too_many_references"
-    assert called == []
 
 
 def test_runtime_configuration_is_resolved_after_provider_creation(monkeypatch):
@@ -418,7 +399,7 @@ def test_remote_download_blocks_unsafe_address(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", fake_get)
     with pytest.raises(ValueError, match="private, internal or blocked"):
-        provider._download_remote_image("http://169.254.169.254/latest/meta-data", tmp_path / "x")
+        provider._download_remote_image("http://169.254.169.254/latest/meta-data")
     assert fetched == []
 
 
@@ -454,7 +435,7 @@ def test_remote_download_rejects_redirect(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", fake_get)
     with pytest.raises(ValueError, match="may not redirect"):
-        provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+        provider._download_remote_image("https://images.example/r.png")
     # Only the original URL was requested; the Location was never fetched.
     assert calls == ["https://images.example/r.png"]
 
@@ -485,7 +466,7 @@ def test_remote_download_disables_redirect_following(monkeypatch, tmp_path):
         return Response()
 
     monkeypatch.setattr(provider.requests, "get", fake_get)
-    provider._download_remote_image("https://images.example/a.png", tmp_path / "a")
+    provider._download_remote_image("https://images.example/a.png")
     assert captured.get("allow_redirects") is False
 
 
@@ -515,7 +496,7 @@ def test_remote_download_rejects_redirect_history_and_3xx(monkeypatch, tmp_path)
     for status, history in ((200, [object()]), (302, [])):
         monkeypatch.setattr(provider.requests, "get", lambda *a, _r=make(status, history), **k: _r)
         with pytest.raises(ValueError, match="may not redirect"):
-            provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+            provider._download_remote_image("https://images.example/r.png")
 
 
 def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
@@ -527,7 +508,7 @@ def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
         provider.requests, "get", lambda *a, **k: fetched.append(a) or (_ for _ in ()).throw(AssertionError)
     )
     with pytest.raises(ValueError, match="private, internal or blocked"):
-        provider._download_remote_image("http://8.8.8.8/x.png", tmp_path / "h")
+        provider._download_remote_image("http://8.8.8.8/x.png")
     assert fetched == []
 
 
@@ -543,6 +524,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
         history = []
 
         def iter_content(self, chunk_size):
+            yield b"\x89PNG\r\n\x1a\n" + b"x" * 16
             for _ in range(6):
                 yield b"x" * (10 * 1024 * 1024)
 
@@ -554,7 +536,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
     with pytest.raises(ValueError, match="byte limit"):
-        provider._download_remote_image("https://images.example/big.png", tmp_path / "big")
+        provider._download_remote_image("https://images.example/big.png")
 
 
 def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
@@ -579,7 +561,7 @@ def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
     with pytest.raises(ValueError, match="not a supported image"):
-        provider._download_remote_image("https://images.example/page.html", tmp_path / "p")
+        provider._download_remote_image("https://images.example/page.html")
 
 
 def _load_manifest():
@@ -806,6 +788,262 @@ def test_request_deadline_resolution(monkeypatch):
     assert provider._request_deadline_seconds() == float(provider.DEFAULT_REQUEST_DEADLINE)
     monkeypatch.setattr(provider, "_plugin_config", lambda: {"request_deadline": "42"})
     assert provider._request_deadline_seconds() == 42.0
+
+
+def _multi_source_provider(provider):
+    return provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
+    )
+
+
+def _write_sources(tmp_path, count):
+    paths = []
+    for index in range(count):
+        path = tmp_path / f"ref{index}.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([index]))
+        paths.append(str(path))
+    return paths
+
+
+def test_capabilities_allow_five_reference_images(monkeypatch):
+    provider = load_provider(monkeypatch)
+    assert _multi_source_provider(provider).capabilities()["max_reference_images"] == 5
+
+
+def test_edit_sends_repeated_image_fields_in_order(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    paths = _write_sources(tmp_path, 5)
+    calls = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"edited").decode()}]}
+
+    def post(url, **kwargs):
+        calls.update(url=url, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "post", post)
+    result = _multi_source_provider(provider).generate(
+        "combine", "square", image_url=paths[0], reference_image_urls=paths[1:]
+    )
+
+    assert result["success"] is True
+    files = calls["kwargs"]["files"]
+    assert isinstance(files, list)
+    assert [field for field, _ in files] == ["image"] * 5
+    assert [item[0] for _, item in files] == [f"ref{i}.png" for i in range(5)]
+    assert all(item[2] == "image/png" for _, item in files)
+    assert calls["kwargs"]["data"] == {"model": "deployment", "prompt": "combine"}
+
+
+def test_six_sources_rejected_before_any_network_call(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    paths = _write_sources(tmp_path, 6)
+    called = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(provider, "_load_source", lambda *a: called.append("load"))
+    result = _multi_source_provider(provider).generate(
+        "edit", "square", image_url=paths[0], reference_image_urls=paths[1:]
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "too_many_references"
+    assert "5" in result["error"]
+    assert called == []
+
+
+def test_total_upload_cap_rejects_before_posting(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    paths = _write_sources(tmp_path, 3)
+    monkeypatch.setattr(provider, "MAX_TOTAL_UPLOAD_BYTES", 20)  # each source is 9 bytes
+    called = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: called.append(1))
+    result = _multi_source_provider(provider).generate(
+        "edit", "square", image_url=paths[0], reference_image_urls=paths[1:]
+    )
+
+    assert result["success"] is False
+    assert "total" in result["error"].lower()
+    assert called == []
+
+
+def test_each_source_still_validated_in_multi_edit(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    good = _write_sources(tmp_path, 1)[0]
+    bad = tmp_path / "bad.gif"
+    bad.write_bytes(b"GIF89a....")
+    called = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: called.append(1))
+    result = _multi_source_provider(provider).generate(
+        "edit", "square", image_url=good, reference_image_urls=[str(bad)]
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_input"
+    assert called == []
+
+
+def _picker_provider(monkeypatch, discovered, configured=None):
+    module = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_MODEL", raising=False)
+    if configured:
+        monkeypatch.setenv("MAI_IMAGE_MODEL", configured)
+    monkeypatch.setattr(module, "_configured_model", lambda: None)
+    monkeypatch.setattr(module, "discover_models", lambda endpoint, key: list(discovered))
+    return module, module.MAIImageProvider(api_key="k", endpoint="https://x.services.ai.azure.com")
+
+
+def test_list_models_puts_configured_deployment_first_with_bare_id(monkeypatch):
+    _, provider = _picker_provider(monkeypatch, [], configured="my-mai-deployment")
+    models = provider.list_models()
+
+    assert models[0]["id"] == "my-mai-deployment"
+    assert "configured" in models[0]["display"].lower()
+    assert [m["id"] for m in models[1:]][:2] == ["MAI-Image-2.6-Flash", "MAI-Image-2.6"]
+
+
+def test_list_models_dedupes_configured_deployment_in_fallback(monkeypatch):
+    _, provider = _picker_provider(monkeypatch, [], configured="MAI-Image-2.6")
+    ids = [m["id"] for m in provider.list_models()]
+
+    assert ids[0] == "MAI-Image-2.6"
+    assert ids.count("MAI-Image-2.6") == 1
+    assert len(ids) == 5
+
+
+def test_list_models_dedupes_configured_deployment_in_discovery(monkeypatch):
+    _, provider = _picker_provider(
+        monkeypatch, [{"id": "dep-a", "display": "dep-a"}, {"id": "dep-b", "display": "dep-b"}], configured="dep-b"
+    )
+    assert [m["id"] for m in provider.list_models()] == ["dep-b", "dep-a"]
+
+
+def test_list_models_labels_fallback_entries_without_mangling_ids(monkeypatch):
+    module, provider = _picker_provider(monkeypatch, [])
+    models = provider.list_models()
+
+    assert [m["id"] for m in models] == list(module.FALLBACK_MODELS)
+    for entry in models:
+        assert "must match your deployment name" in entry["display"]
+        assert entry["display"].startswith(entry["id"])
+        assert "(" not in entry["id"]
+        assert entry["strengths"]
+
+
+def test_list_models_without_configuration_has_no_configured_entry(monkeypatch):
+    _, provider = _picker_provider(monkeypatch, [])
+    assert not any("configured" in m["display"].lower() for m in provider.list_models())
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://x.services.ai.azure.com",
+        "https://x.services.ai.azure.com/",
+        "https://x.services.ai.azure.com/mai/v1",
+        "https://x.services.ai.azure.com/mai/v1/",
+        "https://x.services.ai.azure.com/models",
+        "https://x.services.ai.azure.com/openai/v1",
+        "https://x.services.ai.azure.com/openai",
+        "https://x.services.ai.azure.com/api/projects/my-proj",
+        "https://x.services.ai.azure.com/api/projects/my-proj/",
+        "https://X.services.ai.azure.com/mai/v1?api-version=1",
+        "x.services.ai.azure.com",
+        "x.services.ai.azure.com/mai/v1",
+    ],
+)
+def test_endpoint_normalizes_to_resource_root(monkeypatch, raw):
+    provider = load_provider(monkeypatch)
+    assert provider._endpoint(raw) == "https://x.services.ai.azure.com"
+
+
+def test_endpoint_keeps_port_and_logs_once(monkeypatch, caplog):
+    provider = load_provider(monkeypatch)
+    with caplog.at_level("DEBUG", logger=provider.logger.name):
+        assert provider._endpoint("https://h.example:8443/mai/v1") == "https://h.example:8443"
+        provider._endpoint("https://h.example:8443/mai/v1")
+        provider._endpoint("https://h.example:8443")
+    assert len([r for r in caplog.records if "normalized" in r.getMessage()]) == 1
+
+
+def test_http_endpoint_rejected_without_request(monkeypatch):
+    provider = load_provider(monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no HTTP request expected")
+
+    monkeypatch.setattr(provider.requests, "post", boom)
+    monkeypatch.setattr(provider.requests, "get", boom)
+    monkeypatch.setattr(provider, "_post_with_retry", boom)
+    p = provider.MAIImageProvider(api_key="k", endpoint="http://x.services.ai.azure.com")
+    result = p.generate("a cat")
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_config"
+    assert "https" in result["error"]
+    assert not p.is_available()
+    assert p.list_models()
+
+
+def test_list_models_skips_discovery_without_credentials(monkeypatch):
+    provider = load_provider(monkeypatch)
+    calls = []
+    monkeypatch.setattr(provider, "discover_models", lambda *a: calls.append(a) or [])
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {})
+    monkeypatch.delenv("MAI_FOUNDRY_ENDPOINT", raising=False)
+    provider.MAIImageProvider(api_key="k", endpoint="").list_models()
+    provider.MAIImageProvider(api_key="", endpoint="https://x.services.ai.azure.com").list_models()
+    assert calls == []
+
+
+def test_local_source_over_cap_rejected_by_stat_without_read(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    source = tmp_path / "big.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    monkeypatch.setattr(provider, "MAX_SOURCE_IMAGE_BYTES", 16)
+
+    def no_read(self):
+        raise AssertionError("oversized file must not be read")
+
+    monkeypatch.setattr(provider.Path, "read_bytes", no_read)
+    with pytest.raises(ValueError, match="byte limit"):
+        provider._load_source(str(source))
+
+
+def test_remote_download_returns_bytes_without_tempfile(monkeypatch):
+    import tempfile
+
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+    body = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+    class Response:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+        history = []
+
+        def iter_content(self, chunk_size):
+            yield body[:4]  # first chunk shorter than the 16-byte magic window
+            yield body[4:]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def no_tempfile(*a, **k):
+        raise AssertionError("remote download must stay in memory")
+
+    monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", no_tempfile)
+    assert provider._download_remote_image("https://images.example/a.png") == body
+    name, data, content_type = provider._load_source("https://images.example/a.png")
+    assert (name, data, content_type) == ("a.png", body, "image/png")
 
 
 def _capture_post(monkeypatch, provider):
