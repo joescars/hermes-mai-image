@@ -13,7 +13,7 @@ name: mai-image
 title: Microsoft Foundry MAI image generation
 repo: https://github.com/joescars/hermes-mai-image
 sha: 37fc496a8caed32679f812cc830221557343e434
-description: "Microsoft Foundry MAI text-to-image generation and single-image editing as a Hermes image_gen provider (image_gen.provider: azure-mai). Maps Hermes aspect ratios onto MAI width/height presets and exposes the resource's own model list. Disclosure — sends your prompt, the optional source image and your MAI_FOUNDRY_API_KEY (read per request through Hermes secret scope for the active profile) over https to your own Azure AI Foundry resource; every generation bills your Foundry subscription with no Hermes approval prompt before spending. Results are downloaded into the Hermes image cache under $HERMES_HOME/cache/images/. No telemetry, shell commands, background processes, self-updates or extra Python dependencies beyond requests."
+description: "Microsoft Foundry MAI text-to-image generation and image editing with up to five reference images as a Hermes image_gen provider (image_gen.provider: azure-mai). Maps Hermes aspect ratios onto MAI width/height presets and exposes the resource's own model list. Disclosure — sends your prompt, the optional source image and your MAI_FOUNDRY_API_KEY (read per request through Hermes secret scope for the active profile) over https to your own Azure AI Foundry resource; every generation bills your Foundry subscription with no Hermes approval prompt before spending. Results are downloaded into the Hermes image cache under $HERMES_HOME/cache/images/. No telemetry, shell commands, background processes, self-updates or extra Python dependencies beyond requests."
 maintainer: joescars
 tier: community
 category: tools
@@ -25,7 +25,7 @@ platforms: []
 known_issues:
   - "The endpoint must be the Foundry *resource root* (for example https://your-resource.services.ai.azure.com); the provider appends /mai/v1 itself. A URL that already ends in /mai/v1 is not supported."
   - "Model discovery uses the resource's /models route, which not every Foundry resource exposes; when it is absent or empty the built-in MAI fallback catalog is used. Override the discovery path with MAI_FOUNDRY_MODELS_PATH."
-  - "Editing accepts exactly one source image (local path or http(s) URL); requests with additional reference images are rejected."
+  - "Editing accepts up to five JPEG/PNG source images (local paths or http(s) URLs); requests with more than five are rejected before any request is sent."
   - "Source images must be JPEG or PNG; GIF and WebP sources are rejected before upload with error_type invalid_input (no conversion is performed)."
 capabilities:
   provides_tools: []

@@ -231,7 +231,7 @@ prompt=<prompt>
 image=<file>
 ```
 
-The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Exactly one source image is supported for edits; additional references are rejected with a clear error. Generated images remain in Hermes' `$HERMES_HOME/cache/images/`. Successful results expose the WebUI-facing `file://` URI in `image` and retain the absolute cached path in `host_image` for Hermes media delivery.
+The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Up to five source images (JPEG/PNG) are supported for edits and are sent as repeated multipart `image` fields in the order given (`image_url` first, then `reference_image_urls`); more than five are rejected with a `too_many_references` error before any request is sent. Each source passes the same safety, format and size checks, and the combined upload is capped at 250 MB. Generated images remain in Hermes' `$HERMES_HOME/cache/images/`. Successful results expose the WebUI-facing `file://` URI in `image` and retain the absolute cached path in `host_image` for Hermes media delivery.
 
 ### Retry behavior
 
@@ -269,7 +269,7 @@ Source images are the one place this plugin handles untrusted input. Remote refe
 - **Redirects are not followed.** A redirecting source response raises instead of being followed, so a public URL cannot bounce into an internal address. Requests are sent with `allow_redirects=False`, and any 3xx status or response with redirect history is refused. Known limitation: the address check resolves the host separately from the fetch, so a DNS-rebinding attacker who controls a hostname's DNS could in principle return a public address for the check and an internal one for the connection; connection-time IP pinning is not implemented.
 - **Byte caps.** A downloaded source image is capped at 50 MiB (`MAX_REMOTE_IMAGE_BYTES`) enforced while streaming, so an oversized body is aborted rather than buffered; the same limit applies to local source files.
 - **Content sniffing.** The source is validated by magic bytes (PNG or JPEG) and the authoritative MIME type is taken from the file content, not from the file extension or a caller-supplied type. Non-images are rejected, and GIF and WebP sources are rejected before upload (`invalid_input`) because MAI accepts only JPEG or PNG source images; convert them first.
-- **Exactly one reference image.** MAI editing takes a single source image. Zero or one is accepted; two or more are rejected with a `too_many_references` error before any request is sent.
+- **Up to five reference images.** MAI editing takes at most five JPEG/PNG source images. Six or more are rejected with a `too_many_references` error before any request is sent, and the total upload across sources is capped at 250 MB.
 - **Width and height constraints.** Generation uses fixed presets chosen from the resolved aspect ratio and the model family (width and height each ≥ 768; MAI-Image-2.5 family ≤ 1,048,576 pixels, MAI-Image-2.6 family ≤ 2,359,296). 2.5 (default): landscape `1248x832`, square `1024x1024`, portrait `832x1248`. 2.6: landscape `1824x1216`, square `1536x1536`, portrait `1216x1824`. A deployment name containing `2.6` or `2-6` selects the 2.6 sizes; otherwise 2.5 sizes are used. For custom deployment names, set `MAI_IMAGE_SIZE_PROFILE=2.6` (or `2.5`) in the profile `.env`, or `image_gen.azure-mai.size_profile` in `config.yaml`. There is no free-form width/height input.
 
 ## Development

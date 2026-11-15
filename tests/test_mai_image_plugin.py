@@ -265,7 +265,7 @@ def test_edit_uses_multipart_image_upload(monkeypatch, tmp_path):
     assert result["host_image"] == "/tmp/mai.png"
     assert calls["url"].endswith("/mai/v1/images/edits")
     assert calls["kwargs"]["data"] == {"model": "deployment", "prompt": "make it brighter"}
-    assert calls["kwargs"]["files"]["image"][0] == "source.png"
+    assert calls["kwargs"]["files"] == [("image", ("source.png", b"\x89PNG\r\n\x1a\nimage", "image/png"))]
 
 
 def test_edit_blocks_credential_path(monkeypatch, tmp_path):
@@ -336,24 +336,6 @@ def test_edit_rejects_gif_and_webp_without_posting(monkeypatch, tmp_path, name, 
 def test_source_validation_accepts_jpeg(monkeypatch):
     provider = load_provider(monkeypatch)
     assert provider._validate_image_bytes(b"\xff\xd8\xff\xe0data", "") == "image/jpeg"
-
-
-def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):
-    provider = load_provider(monkeypatch)
-    first = tmp_path / "first.png"
-    second = tmp_path / "second.png"
-    first.write_bytes(b"image")
-    second.write_bytes(b"image")
-
-    called = []
-    monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: called.append(1))
-    result = provider.MAIImageProvider(
-        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
-    ).generate("edit", "square", image_url=str(first), reference_image_urls=[str(second)])
-
-    assert result["success"] is False
-    assert result["error_type"] == "too_many_references"
-    assert called == []
 
 
 def test_runtime_configuration_is_resolved_after_provider_creation(monkeypatch):
@@ -806,3 +788,100 @@ def test_request_deadline_resolution(monkeypatch):
     assert provider._request_deadline_seconds() == float(provider.DEFAULT_REQUEST_DEADLINE)
     monkeypatch.setattr(provider, "_plugin_config", lambda: {"request_deadline": "42"})
     assert provider._request_deadline_seconds() == 42.0
+
+
+def _multi_source_provider(provider):
+    return provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
+    )
+
+
+def _write_sources(tmp_path, count):
+    paths = []
+    for index in range(count):
+        path = tmp_path / f"ref{index}.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([index]))
+        paths.append(str(path))
+    return paths
+
+
+def test_capabilities_allow_five_reference_images(monkeypatch):
+    provider = load_provider(monkeypatch)
+    assert _multi_source_provider(provider).capabilities()["max_reference_images"] == 5
+
+
+def test_edit_sends_repeated_image_fields_in_order(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    paths = _write_sources(tmp_path, 5)
+    calls = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"edited").decode()}]}
+
+    def post(url, **kwargs):
+        calls.update(url=url, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "post", post)
+    result = _multi_source_provider(provider).generate(
+        "combine", "square", image_url=paths[0], reference_image_urls=paths[1:]
+    )
+
+    assert result["success"] is True
+    files = calls["kwargs"]["files"]
+    assert isinstance(files, list)
+    assert [field for field, _ in files] == ["image"] * 5
+    assert [item[0] for _, item in files] == [f"ref{i}.png" for i in range(5)]
+    assert all(item[2] == "image/png" for _, item in files)
+    assert calls["kwargs"]["data"] == {"model": "deployment", "prompt": "combine"}
+
+
+def test_six_sources_rejected_before_any_network_call(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    paths = _write_sources(tmp_path, 6)
+    called = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: called.append(1))
+    monkeypatch.setattr(provider, "_load_source", lambda *a: called.append("load"))
+    result = _multi_source_provider(provider).generate(
+        "edit", "square", image_url=paths[0], reference_image_urls=paths[1:]
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "too_many_references"
+    assert "5" in result["error"]
+    assert called == []
+
+
+def test_total_upload_cap_rejects_before_posting(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    paths = _write_sources(tmp_path, 3)
+    monkeypatch.setattr(provider, "MAX_TOTAL_UPLOAD_BYTES", 20)  # each source is 9 bytes
+    called = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: called.append(1))
+    result = _multi_source_provider(provider).generate(
+        "edit", "square", image_url=paths[0], reference_image_urls=paths[1:]
+    )
+
+    assert result["success"] is False
+    assert "total" in result["error"].lower()
+    assert called == []
+
+
+def test_each_source_still_validated_in_multi_edit(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    good = _write_sources(tmp_path, 1)[0]
+    bad = tmp_path / "bad.gif"
+    bad.write_bytes(b"GIF89a....")
+    called = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: called.append(1))
+    result = _multi_source_provider(provider).generate(
+        "edit", "square", image_url=good, reference_image_urls=[str(bad)]
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_input"
+    assert called == []

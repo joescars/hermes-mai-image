@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Image edits accept up to five reference images (repeated multipart `image` fields, in order), with
+  per-source checks, a total upload cap, and rejection of more than five before any request (#21).
 - Credential resolution through the Hermes secret scope, so provider settings are read from the
   active profile's secret store instead of ambient environment lookup.
 - An in-plugin, SSRF-safe image downloader that validates reference image URLs before fetching
