@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+_Nothing yet._
 
-- Source images stream into memory (no temp file), local files are size-checked via `stat` before reading, `MAX_REMOTE_IMAGE_BYTES` is renamed `MAX_SOURCE_IMAGE_BYTES`, and the contradictory `agent.file_safety` comment is fixed.
+## [0.2.0] - 2026-11-15
 
 ### Added
 
@@ -27,11 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invalid_config` without a request, and model discovery is skipped without credentials.
 - Credential resolution through the Hermes secret scope, so provider settings are read from the
   active profile's secret store instead of ambient environment lookup.
-- An in-plugin, SSRF-safe image downloader that validates reference image URLs before fetching
-  them, replacing a private Hermes import.
-- A draft catalog entry under `plugin-catalog/` for submission to the Hermes plugin catalog.
+- An in-plugin, SSRF-safe image downloader that validates reference image URLs with the published
+  `tools.url_safety.is_safe_url` before fetching them. Local reference files are still checked with
+  the private `agent.file_safety.raise_if_read_blocked` import (documented in the README; tracked by #7).
+- A draft catalog entry under `catalog/` for submission to the Hermes plugin catalog.
 
 ### Changed
+
+- Source images stream into memory (no temp file), local files are size-checked via `stat` before reading, `MAX_REMOTE_IMAGE_BYTES` is renamed `MAX_SOURCE_IMAGE_BYTES`, and the contradictory `agent.file_safety` comment is fixed.
+
 
 - CI hardening: ruff lint, Python 3.13/3.14 matrix, SHA-pinned actions, Dependabot, wheel `plugin.yaml` check, a tag-triggered PyPI Trusted Publishing release workflow, and SPDX license metadata (#29).
 - Image sizes are now model-aware: MAI-Image-2.5 models use presets within the 1,048,576-pixel limit
@@ -49,11 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security: remote source-image downloads no longer follow redirects (`allow_redirects=False`; 3xx and redirect history are rejected), closing an SSRF bypass (#19).
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
-- Provider robustness: HTTP requests to the Foundry MAI endpoints now use retry with backoff, and
-  the image download path is safe to call from an active event loop.
 - Provider robustness: remote image downloads enforce a byte cap to bound memory use.
-- Manifest metadata completed, and the package version single-sourced so the plugin manifest and
-  the Python package report the same version.
+- Runtime dependency is bounded: `requests>=2.28,<3` (catalog rule 10 asks for a floor and an upper bound).
+- Manifest metadata completed; `pyproject.toml` and `plugin.yaml` declare the same version, enforced
+  by a test that parses both.
 - README updated for catalog submission (installation, configuration, and discovery instructions).
 
 ## [0.1.2]
@@ -62,3 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - README installation, configuration, Web UI, CLI, troubleshooting, and update instructions
   refreshed for the current Hermes plugin discovery flow.
+
+[Unreleased]: https://github.com/joescars/hermes-mai-image/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.2.0
+[0.1.2]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.1.2
