@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Honor Hermes secret scope for `MAI_FOUNDRY_API_KEY` (no env fallback inside Hermes); endpoint is a non-secret setting resolvable from `image_gen.azure-mai.*` config or env, and model/models-path are declared optional (#25).
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
 - Provider robustness: HTTP requests to the Foundry MAI endpoints now use retry with backoff, and

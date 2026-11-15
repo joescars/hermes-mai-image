@@ -460,13 +460,42 @@ def test_setting_uses_hermes_secret_without_consulting_environment(monkeypatch):
         raise AssertionError("environment fallback was consulted")
 
     monkeypatch.setattr(provider.os.environ, "get", environment_must_not_be_consulted)
-    assert provider._setting(provider.API_KEY_ENV) == "scoped-key"
+    assert provider._secret(provider.API_KEY_ENV) == "scoped-key"
+
+def test_missing_scoped_secret_does_not_fall_back_to_environment_in_hermes(monkeypatch):
+    secret_scope = ModuleType("agent.secret_scope")
+    secret_scope.get_secret = lambda name: None
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", secret_scope)
+    monkeypatch.setenv("MAI_FOUNDRY_API_KEY", "other-profile-key")
+    provider = load_provider(monkeypatch)
+    assert provider._secret(provider.API_KEY_ENV) == ""
+
+
+def test_manifest_declares_endpoint_non_secret_and_optional_settings():
+    manifest = _load_manifest()
+    schema = manifest["config_schema"]
+    assert schema["MAI_FOUNDRY_API_KEY"]["type"] == "secret"
+    assert schema["MAI_FOUNDRY_ENDPOINT"]["type"] == "string"
+    for name in ("MAI_IMAGE_MODEL", "MAI_FOUNDRY_MODELS_PATH"):
+        assert schema[name]["type"] == "string" and schema[name]["required"] is False
+        assert name in manifest["optional_env"]
+
+
+def test_non_secret_settings_prefer_config_over_environment(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://env.example")
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {"image_gen": {"azure-mai": {"endpoint": "https://cfg.example/", "models_path": "/m"}}})
+    assert provider._endpoint() == "https://cfg.example"
+    assert provider._setting(provider.DISCOVERY_PATH_ENV, "models_path", "/models") == "/m"
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {})
+    assert provider._endpoint() == "https://env.example"
+
 
 def test_setting_falls_back_to_environment_without_hermes(monkeypatch):
     monkeypatch.delenv("MAI_FOUNDRY_API_KEY", raising=False)
     provider = load_provider(monkeypatch)
     monkeypatch.setenv("MAI_FOUNDRY_API_KEY", "environment-key")
-    assert provider._setting(provider.API_KEY_ENV) == "environment-key"
+    assert provider._secret(provider.API_KEY_ENV) == "environment-key"
 
 
 def test_ssrf_guard_blocks_private_and_metadata_addresses(monkeypatch):
