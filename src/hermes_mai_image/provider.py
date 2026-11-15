@@ -9,9 +9,12 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import random
 import re
 import tempfile
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
@@ -66,6 +69,12 @@ except ImportError:  # pragma: no cover - only for standalone import outside Her
 MAX_REMOTE_IMAGE_BYTES = 50 * 1024 * 1024
 REMOTE_TIMEOUT = (5, 15)
 MAX_REQUEST_ATTEMPTS = 3
+# 429 always; 502/503 only. 500/504 are never retried: a paid generation may have run.
+RETRYABLE_STATUSES = frozenset({429, 502, 503})
+RATE_LIMIT_BACKOFF = (10.0, 30.0)  # seconds, before jitter; MAI tier-1 is ~2 RPM
+MAX_RETRY_AFTER = 120.0
+DEADLINE_ENV = "MAI_REQUEST_DEADLINE"
+DEFAULT_REQUEST_DEADLINE = 600  # seconds for one request including retries
 
 DEFAULT_ENDPOINT = ""
 DEFAULT_MODEL = "MAI-Image-2.5"
@@ -99,13 +108,26 @@ SIZES_2_6 = {
 SIZES = SIZES_2_5
 
 
-def _setting(name: str, default: str = "") -> str:
-    value = get_secret(name) if get_secret is not None else None
-    return (value or os.environ.get(name) or default).strip()
+def _secret(name: str) -> str:
+    """Resolve a secret. Inside Hermes only the profile-scoped ``get_secret`` is used
+    (no ``os.environ`` fallback, which could leak another profile's key under
+    multiplexing). ``os.environ`` is read only when running outside Hermes."""
+    if get_secret is not None:
+        return (get_secret(name) or "").strip()
+    return (os.environ.get(name) or "").strip()
+
+
+def _setting(name: str, config_key: str, default: str = "") -> str:
+    """Resolve a non-secret setting: ``image_gen.azure-mai.<config_key>`` in config.yaml,
+    then the ``name`` environment variable, then ``default``."""
+    scoped = _plugin_config().get(config_key)
+    if scoped is not None and str(scoped).strip():
+        return str(scoped).strip()
+    return (os.environ.get(name) or default).strip()
 
 
 def _endpoint(endpoint: Optional[str] = None) -> str:
-    return (endpoint or _setting(ENDPOINT_ENV, DEFAULT_ENDPOINT)).rstrip("/")
+    return (endpoint or _setting(ENDPOINT_ENV, "endpoint", DEFAULT_ENDPOINT)).rstrip("/")
 
 
 def _headers(api_key: str) -> Dict[str, str]:
@@ -121,6 +143,12 @@ def _load_image_gen_config() -> Dict[str, Any]:
         return {}
 
 
+def _plugin_config() -> Dict[str, Any]:
+    section = _load_image_gen_config().get("image_gen")
+    scoped = section.get("azure-mai") if isinstance(section, dict) else None
+    return scoped if isinstance(scoped, dict) else {}
+
+
 def _configured_model() -> Optional[str]:
     config = _load_image_gen_config()
     section = config.get("image_gen") if isinstance(config, dict) else None
@@ -134,34 +162,65 @@ def _configured_model() -> Optional[str]:
 
 
 def _sizes_for(model: str) -> Dict[str, Any]:
-    """Pick the size table: explicit override (env, then config), else detect 2.6 in the name."""
-    profile = _setting(SIZE_PROFILE_ENV)
-    if not profile:
-        section = _load_image_gen_config().get("image_gen")
-        scoped = section.get("azure-mai") if isinstance(section, dict) else None
-        if isinstance(scoped, dict):
-            profile = str(scoped.get("size_profile") or "").strip()
+    """Pick the size table: explicit override (config, then env), else detect 2.6 in the name."""
+    profile = _setting(SIZE_PROFILE_ENV, "size_profile")
     if profile in ("2.5", "2.6"):
         return SIZES_2_6 if profile == "2.6" else SIZES_2_5
     return SIZES_2_6 if re.search(r"2[.\-_]6", model or "") else SIZES_2_5
 
 
 def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
-    return str(explicit or override or _setting(MODEL_ENV) or _configured_model() or DEFAULT_MODEL)
+    return str(explicit or override or _setting(MODEL_ENV, "model") or _configured_model() or DEFAULT_MODEL)
+
+
+_MAX_ERROR_DETAIL = 500
 
 
 def _http_error_message(response: Any, model: str) -> str:
     status = getattr(response, "status_code", None)
+    code = None
+    detail = None
     try:
         body = response.json()
-        detail = body.get("error", {}).get("message") if isinstance(body, dict) else None
+        err = body.get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            code = err.get("code")
+            detail = err.get("message")
+        elif isinstance(err, str):
+            detail = err
     except Exception:
-        detail = None
-    detail = str(detail or getattr(response, "text", "") or "request rejected").strip()
-    if status in (400, 404):
+        pass
+    if not detail:
+        # Non-JSON body (e.g. an HTML error page): strip markup and collapse whitespace.
+        raw = str(getattr(response, "text", "") or "")
+        detail = " ".join(re.sub(r"<[^>]*>", " ", raw).split())
+    detail = str(detail or "no details returned").strip()
+    if code:
+        detail = f"{code}: {detail}"
+    if len(detail) > _MAX_ERROR_DETAIL:
+        detail = detail[:_MAX_ERROR_DETAIL] + "..."
+    if status == 404:
         return (
-            f"MAI deployment '{model}' was not found or is not available on this Foundry resource "
-            f"({status}). Use the exact deployment name from Microsoft Foundry. Details: {detail}"
+            f"MAI deployment '{model}' or endpoint was not found ({status}). Use the exact deployment "
+            f"name from Microsoft Foundry and check that {ENDPOINT_ENV} is the resource root. Details: {detail}"
+        )
+    if status == 400:
+        return (
+            f"Request rejected by MAI ({status}): the prompt, image or parameters were not accepted "
+            "(this can include content-safety rejections). Check that images are at least 768 pixels on "
+            "each side and within the pixel limits, and are JPEG or PNG. "
+            f"Details: {detail}"
+        )
+    if status in (401, 403):
+        return (
+            f"MAI authentication failed ({status}). Check that {API_KEY_ENV} is valid for this Foundry "
+            f"resource and that {ENDPOINT_ENV} points to the same resource. Details: {detail}"
+        )
+    if status == 429:
+        return (
+            f"MAI rate limit exceeded ({status}) after retries. Your quota tier limits requests per minute "
+            "(tier-1 MAI-Image-2.5 is 2 RPM); wait and retry or request a higher quota tier. "
+            f"Details: {detail}"
         )
     return f"MAI request failed ({status or 'unknown status'}): {detail}"
 
@@ -184,7 +243,7 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     Foundry resources expose ``/models`` and some do not, so callers must use
     the fallback catalog when this returns an empty list.
     """
-    path = _setting(DISCOVERY_PATH_ENV, "/models")
+    path = _setting(DISCOVERY_PATH_ENV, "models_path", "/models")
     if not path.startswith("/"):
         path = "/" + path
     try:
@@ -230,41 +289,95 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     return models
 
 
+class UnsupportedImageFormat(ValueError):
+    """Source is a real image in a format MAI does not accept (not JPEG/PNG)."""
+
+
 def _validate_image_bytes(data: bytes, content_type: str) -> str:
-    """Reject non-images and return the authoritative MIME type from magic bytes."""
+    """Reject non-images and return the authoritative MIME type from magic bytes.
+
+    MAI edits accept only JPEG and PNG sources; GIF/WebP are rejected before upload.
+    """
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if data.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
     if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
+        raise UnsupportedImageFormat("MAI accepts JPEG or PNG source images (received GIF)")
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        return "image/webp"
+        raise UnsupportedImageFormat("MAI accepts JPEG or PNG source images (received WebP)")
     raise ValueError(f"Source is not a supported image (received {content_type or 'unknown type'})")
 
 
+def _now() -> float:
+    """Monotonic clock for the request deadline (a seam so tests never sleep)."""
+    return time.monotonic()
+
+
+def _request_deadline_seconds() -> float:
+    """Overall budget for one logical request, retries included (``MAI_REQUEST_DEADLINE``)."""
+    try:
+        value = float(_setting(DEADLINE_ENV, "request_deadline", str(DEFAULT_REQUEST_DEADLINE)))
+    except (TypeError, ValueError):
+        return float(DEFAULT_REQUEST_DEADLINE)
+    return value if value > 0 else float(DEFAULT_REQUEST_DEADLINE)
+
+
+def _parse_retry_after(raw: Any) -> Optional[float]:
+    """Parse ``Retry-After`` as delta-seconds or an HTTP-date; ``None`` when unusable."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
 def _retry_delay(response: Any, attempt: int) -> float:
-    """Seconds to wait before retry ``attempt`` (1-based): ``Retry-After``, else 2**(attempt-1)."""
+    """Seconds to wait before retry ``attempt`` (1-based).
+
+    Honours ``Retry-After`` (seconds or HTTP-date, capped); otherwise a long backoff with
+    jitter sized for MAI's low requests-per-minute quotas (~10s, then ~30s).
+    """
     headers = getattr(response, "headers", None) or {}
     raw = headers.get("Retry-After") if hasattr(headers, "get") else None
-    try:
-        if raw is not None:
-            return max(0.0, min(float(raw), 60.0))
-    except (TypeError, ValueError):
-        pass
-    return float(2 ** (attempt - 1))
+    parsed = _parse_retry_after(raw)
+    if parsed is not None:
+        return min(parsed, MAX_RETRY_AFTER)
+    base = RATE_LIMIT_BACKOFF[min(attempt, len(RATE_LIMIT_BACKOFF)) - 1]
+    return base + random.uniform(0, base * 0.25)
 
 
 def _post_with_retry(url: str, **kwargs: Any):
-    """``requests.post`` with bounded retry on 429/5xx; returns the final response."""
+    """``requests.post`` with bounded retry; returns the final response.
+
+    Retries 429 (always) and 502/503. Never 500/504: those do not prove the paid generation
+    did not run. All attempts and waits share one deadline; per-request timeout is clamped
+    to the remaining budget and we never sleep past it.
+    """
+    deadline = _now() + _request_deadline_seconds()
+    base_timeout = kwargs.pop("timeout", REQUEST_TIMEOUT)
     response = None
     for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
-        response = requests.post(url, **kwargs)
+        remaining = deadline - _now()
+        response = requests.post(url, timeout=min(base_timeout, remaining), **kwargs)
         status = getattr(response, "status_code", None)
-        retryable = isinstance(status, int) and (status == 429 or 500 <= status < 600)
-        if not retryable or attempt == MAX_REQUEST_ATTEMPTS:
+        if status not in RETRYABLE_STATUSES or attempt == MAX_REQUEST_ATTEMPTS:
             return response
-        time.sleep(_retry_delay(response, attempt))
+        delay = _retry_delay(response, attempt)
+        if _now() + delay >= deadline:
+            return response
+        time.sleep(delay)
     return response
 
 
@@ -332,8 +445,13 @@ def _download_remote_image(url: str, destination: Path) -> Path:
         raise ValueError("Remote image URL resolves to a private, internal or blocked address")
 
     total = 0
-    with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT) as response:
-        if response.is_redirect or response.is_permanent_redirect:
+    with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT, allow_redirects=False) as response:
+        if (
+            response.is_redirect
+            or response.is_permanent_redirect
+            or response.history
+            or 300 <= response.status_code < 400
+        ):
             raise ValueError("Remote image may not redirect")
         if response.status_code >= 400:
             raise ValueError(f"Image download failed with HTTP {response.status_code}")
@@ -417,7 +535,7 @@ class MAIImageProvider(ImageGenProvider):
 
     def _credentials(self) -> tuple[str, str]:
         return (
-            self.api_key_override if self.api_key_override is not None else _setting(API_KEY_ENV),
+            self.api_key_override if self.api_key_override is not None else _secret(API_KEY_ENV),
             _endpoint(self.endpoint_override),
         )
 
@@ -511,6 +629,8 @@ class MAIImageProvider(ImageGenProvider):
             if result.get("success"):
                 result["modality"] = modality
             return result
+        except UnsupportedImageFormat as exc:
+            return _error(self.name, prompt, aspect, str(exc), "invalid_input", model)
         except requests.RequestException as exc:
             logger.debug("MAI request failed", exc_info=True)
             response = getattr(exc, "response", None)

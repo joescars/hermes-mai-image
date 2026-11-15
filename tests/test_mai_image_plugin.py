@@ -114,13 +114,83 @@ def test_generation_retries_rate_limit_and_server_errors(monkeypatch):
                 raise provider.requests.HTTPError(response=self)
         def json(self):
             return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
-    responses.extend([Response(500), Response(429), Response(200)])
+    responses.extend([Response(503), Response(429), Response(200)])
     sleeps = []
     monkeypatch.setattr(provider.time, "sleep", sleeps.append)
     monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: responses.pop(0))
     result = provider.MAIImageProvider(api_key="key", endpoint="https://example", model="m").generate("cat")
     assert result["success"] is True
-    assert sleeps == [1, 3]  # exponential backoff, then Retry-After
+    assert 10 <= sleeps[0] <= 13  # no Retry-After: long jittered backoff
+    assert sleeps[1] == 3  # Retry-After seconds honoured
+
+
+class _Resp:
+    def __init__(self, provider, status, headers=None):
+        self._provider = provider
+        self.status_code = status
+        self.headers = headers or {}
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise self._provider.requests.HTTPError(response=self)
+    def json(self):
+        return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
+
+
+def _run_posts(monkeypatch, provider, responses, deadline=None):
+    """Drive generate() with a fake clock; sleep advances it. Returns (result, calls, sleeps)."""
+    clock = [1000.0]
+    sleeps, calls = [], []
+    monkeypatch.setattr(provider, "_now", lambda: clock[0])
+    monkeypatch.setattr(provider.time, "sleep", lambda s: (sleeps.append(s), clock.__setitem__(0, clock[0] + s)))
+    def post(*a, **k):
+        calls.append(k.get("timeout"))
+        return responses.pop(0)
+    monkeypatch.setattr(provider.requests, "post", post)
+    if deadline is not None:
+        monkeypatch.setenv("MAI_REQUEST_DEADLINE", str(deadline))
+    result = provider.MAIImageProvider(api_key="key", endpoint="https://example", model="m").generate("cat")
+    return result, calls, sleeps
+
+
+def test_retry_after_http_date_is_honoured(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+    provider = load_provider(monkeypatch)
+    when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=45), usegmt=True)
+    result, calls, sleeps = _run_posts(monkeypatch, provider, [
+        _Resp(provider, 429, {"Retry-After": when}), _Resp(provider, 200)])
+    assert result["success"] is True
+    assert len(sleeps) == 1 and 40 <= sleeps[0] <= 46
+
+
+@pytest.mark.parametrize("status", [500, 504, 501, 400])
+def test_non_retryable_statuses_are_not_retried(monkeypatch, status):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(monkeypatch, provider, [_Resp(provider, status)])
+    assert result["success"] is False
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_502_is_retried(monkeypatch):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(monkeypatch, provider, [_Resp(provider, 502), _Resp(provider, 200)])
+    assert result["success"] is True and len(calls) == 2
+
+
+def test_deadline_stops_retries_and_never_sleeps_past_it(monkeypatch):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(
+        monkeypatch, provider, [_Resp(provider, 429, {"Retry-After": "50"}) for _ in range(3)], deadline=60)
+    assert result["success"] is False
+    assert len(calls) == 2 and sleeps == [50]  # second wait (50s) would overrun the 60s budget
+
+
+def test_request_timeout_shrinks_to_remaining_budget(monkeypatch):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(
+        monkeypatch, provider, [_Resp(provider, 429, {"Retry-After": "50"}), _Resp(provider, 200)], deadline=100)
+    assert result["success"] is True
+    assert calls[0] == 100 and calls[1] == 50
 
 
 def test_generation_retries_stop_at_max(monkeypatch):
@@ -236,6 +306,36 @@ def test_source_validation_rejects_non_image(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="not a supported image"):
         provider._load_source(str(source))
+
+
+@pytest.mark.parametrize(
+    "name,data",
+    [
+        ("anim.gif", b"GIF89a" + b"\x00" * 10),
+        ("old.gif", b"GIF87a" + b"\x00" * 10),
+        ("pic.webp", b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+    ],
+)
+def test_edit_rejects_gif_and_webp_without_posting(monkeypatch, tmp_path, name, data):
+    provider = load_provider(monkeypatch)
+    source = tmp_path / name
+    source.write_bytes(data)
+    posted = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: posted.append(1))
+
+    result = provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
+    ).generate("edit", "square", image_url=str(source))
+
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_input"
+    assert "JPEG or PNG" in result["error"]
+    assert posted == []
+
+
+def test_source_validation_accepts_jpeg(monkeypatch):
+    provider = load_provider(monkeypatch)
+    assert provider._validate_image_bytes(b"\xff\xd8\xff\xe0data", "") == "image/jpeg"
 
 
 def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):
@@ -359,6 +459,65 @@ def test_remote_download_rejects_redirect(monkeypatch, tmp_path):
     assert calls == ["https://images.example/r.png"]
 
 
+def test_remote_download_disables_redirect_following(monkeypatch, tmp_path):
+    """requests must be told not to follow redirects; is_redirect alone never fires otherwise."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+    captured = {}
+
+    class Response:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+        history = []
+
+        def iter_content(self, chunk_size):
+            yield b"\x89PNG\r\n\x1a\n" + b"0" * 16
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_get(url, *args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "get", fake_get)
+    provider._download_remote_image("https://images.example/a.png", tmp_path / "a")
+    assert captured.get("allow_redirects") is False
+
+
+def test_remote_download_rejects_redirect_history_and_3xx(monkeypatch, tmp_path):
+    """A response that was reached via redirects, or is itself a 3xx, is refused."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+
+    def make(status, history):
+        class Response:
+            status_code = status
+            is_redirect = False
+            is_permanent_redirect = False
+
+            def iter_content(self, chunk_size):
+                raise AssertionError("must not be streamed")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        Response.history = history
+        return Response()
+
+    for status, history in ((200, [object()]), (302, [])):
+        monkeypatch.setattr(provider.requests, "get", lambda *a, _r=make(status, history), **k: _r)
+        with pytest.raises(ValueError, match="may not redirect"):
+            provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+
+
 def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
     """Plain HTTP is refused even for a public address (HTTPS-only policy)."""
     provider = load_provider(monkeypatch)
@@ -381,6 +540,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             for _ in range(6):
@@ -406,6 +566,7 @@ def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             yield b"<html>not an image</html>"
@@ -460,13 +621,42 @@ def test_setting_uses_hermes_secret_without_consulting_environment(monkeypatch):
         raise AssertionError("environment fallback was consulted")
 
     monkeypatch.setattr(provider.os.environ, "get", environment_must_not_be_consulted)
-    assert provider._setting(provider.API_KEY_ENV) == "scoped-key"
+    assert provider._secret(provider.API_KEY_ENV) == "scoped-key"
+
+def test_missing_scoped_secret_does_not_fall_back_to_environment_in_hermes(monkeypatch):
+    secret_scope = ModuleType("agent.secret_scope")
+    secret_scope.get_secret = lambda name: None
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", secret_scope)
+    monkeypatch.setenv("MAI_FOUNDRY_API_KEY", "other-profile-key")
+    provider = load_provider(monkeypatch)
+    assert provider._secret(provider.API_KEY_ENV) == ""
+
+
+def test_manifest_declares_endpoint_non_secret_and_optional_settings():
+    manifest = _load_manifest()
+    schema = manifest["config_schema"]
+    assert schema["MAI_FOUNDRY_API_KEY"]["type"] == "secret"
+    assert schema["MAI_FOUNDRY_ENDPOINT"]["type"] == "string"
+    for name in ("MAI_IMAGE_MODEL", "MAI_FOUNDRY_MODELS_PATH"):
+        assert schema[name]["type"] == "string" and schema[name]["required"] is False
+        assert name in manifest["optional_env"]
+
+
+def test_non_secret_settings_prefer_config_over_environment(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://env.example")
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {"image_gen": {"azure-mai": {"endpoint": "https://cfg.example/", "models_path": "/m"}}})
+    assert provider._endpoint() == "https://cfg.example"
+    assert provider._setting(provider.DISCOVERY_PATH_ENV, "models_path", "/models") == "/m"
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {})
+    assert provider._endpoint() == "https://env.example"
+
 
 def test_setting_falls_back_to_environment_without_hermes(monkeypatch):
     monkeypatch.delenv("MAI_FOUNDRY_API_KEY", raising=False)
     provider = load_provider(monkeypatch)
     monkeypatch.setenv("MAI_FOUNDRY_API_KEY", "environment-key")
-    assert provider._setting(provider.API_KEY_ENV) == "environment-key"
+    assert provider._secret(provider.API_KEY_ENV) == "environment-key"
 
 
 def test_ssrf_guard_blocks_private_and_metadata_addresses(monkeypatch):
@@ -551,3 +741,68 @@ def test_all_sizes_within_limits(monkeypatch):
     for table, limit in ((provider.SIZES_2_5, 1048576), (provider.SIZES_2_6, 2359296)):
         for w, h in table.values():
             assert w >= 768 and h >= 768 and w * h <= limit
+
+
+def _fake_response(status, body=None, text=""):
+    class Response:
+        status_code = status
+        headers = {"api-key": "SECRET-KEY"}
+
+        def __init__(self):
+            self.text = text
+
+        def json(self):
+            if body is None:
+                raise ValueError("not json")
+            return body
+
+    return Response()
+
+
+def test_http_400_is_request_rejected_not_deployment(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(
+        _fake_response(400, {"error": {"code": "invalid_size", "message": "bad width"}}), "dep"
+    )
+    assert "equest rejected by MAI" in msg
+    assert "invalid_size" in msg and "bad width" in msg
+    assert "768" in msg and "PNG" in msg
+    assert "not found" not in msg
+
+
+def test_http_404_mentions_deployment_and_endpoint(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(404, {"error": {"message": "x"}}), "my-dep")
+    assert "my-dep" in msg and "exact deployment name" in msg and "endpoint" in msg
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_http_auth_errors_do_not_leak_key(monkeypatch, status):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(status, {"error": {"message": "denied"}}), "dep")
+    assert "authentication" in msg.lower() and "MAI_FOUNDRY_API_KEY" in msg
+    assert "SECRET-KEY" not in msg
+
+
+def test_http_429_mentions_quota_tiers(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(429, {"error": {"message": "slow"}}), "dep")
+    assert "rate limit" in msg.lower() and "tier" in msg.lower()
+
+
+def test_html_body_is_truncated(monkeypatch):
+    provider = load_provider(monkeypatch)
+    html = "<html>" + "x" * 5000 + "</html>"
+    msg = provider._http_error_message(_fake_response(400, None, html), "dep")
+    assert "equest rejected by MAI" in msg
+    assert len(msg) < 1200
+    assert "<html>" not in msg
+
+
+def test_request_deadline_resolution(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_REQUEST_DEADLINE", raising=False)
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {})
+    assert provider._request_deadline_seconds() == float(provider.DEFAULT_REQUEST_DEADLINE)
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {"request_deadline": "42"})
+    assert provider._request_deadline_seconds() == 42.0

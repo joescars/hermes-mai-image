@@ -104,7 +104,7 @@ MAI_FOUNDRY_ENDPOINT
 
 **Credential handling.** The plugin reads `MAI_FOUNDRY_API_KEY` and `MAI_FOUNDRY_ENDPOINT` through Hermes secret scope for the **active profile** — the values are resolved in the context of the profile that is running, so a second profile cannot pick them up accidentally. The values live in the active profile's `.env` under `$HERMES_HOME/profiles/<profile>/.env` (the default profile's `.env` sits at `$HERMES_HOME/.env`). The API key is sent to your Foundry resource in the `api-key` header on each request and is never logged, never written by the plugin anywhere else, and never included in image metadata.
 
-Never put API keys in `config.yaml`, chat messages, or Git. `config.yaml` holds only non-secret model selection, not credentials.
+Never put API keys in `config.yaml`, chat messages, or Git. Only `MAI_FOUNDRY_API_KEY` is a secret: inside Hermes it is read solely from the active profile's secret scope (a same-named process environment variable is ignored); outside Hermes it falls back to the environment. The endpoint, model and discovery path are non-secret and can instead be set in `config.yaml` under `image_gen.azure-mai` as `endpoint`, `model` and `models_path` (config wins over the `MAI_FOUNDRY_ENDPOINT`, `MAI_IMAGE_MODEL`, `MAI_FOUNDRY_MODELS_PATH` env vars; `MAI_IMAGE_MODEL` and `MAI_FOUNDRY_MODELS_PATH` are optional). `config.yaml` holds only non-secret model selection, not credentials.
 
 If the provider does not appear, restart the dashboard after installing the package. A browser refresh alone does not reload Python plugins.
 
@@ -152,7 +152,7 @@ MAI_FOUNDRY_ENDPOINT=https://your-resource.services.ai.azure.com
 MAI_IMAGE_MODEL=your-deployment-name
 ```
 
-Never put API keys in `config.yaml`, chat messages, or Git. `MAI_IMAGE_MODEL` defaults to `MAI-Image-2.5` if omitted, but the exact deployment name is recommended.
+Never put API keys in `config.yaml`, chat messages, or Git. Only `MAI_FOUNDRY_API_KEY` is a secret: inside Hermes it is read solely from the active profile's secret scope (a same-named process environment variable is ignored); outside Hermes it falls back to the environment. The endpoint, model and discovery path are non-secret and can instead be set in `config.yaml` under `image_gen.azure-mai` as `endpoint`, `model` and `models_path` (config wins over the `MAI_FOUNDRY_ENDPOINT`, `MAI_IMAGE_MODEL`, `MAI_FOUNDRY_MODELS_PATH` env vars; `MAI_IMAGE_MODEL` and `MAI_FOUNDRY_MODELS_PATH` are optional). `MAI_IMAGE_MODEL` defaults to `MAI-Image-2.5` if omitted, but the exact deployment name is recommended.
 
 ### 8. Test generation
 
@@ -209,7 +209,7 @@ MAI-Image-2.5
 MAI_FOUNDRY_MODELS_PATH=/models
 ```
 
-The model actually sent to MAI is resolved in this order: an explicit per-request model, then `MAI_IMAGE_MODEL` from the active profile's `.env`, then the model set in `config.yaml` (`image_gen.model` or `image_gen.azure-mai.model`), then the `MAI-Image-2.5` default. The discovered list feeds the picker; it does not change which deployment name is sent unless you pick one.
+The model actually sent to MAI is resolved in this order: an explicit per-request model, then `image_gen.azure-mai.model` in `config.yaml`, then `MAI_IMAGE_MODEL` from the environment, then `image_gen.model`, then the `MAI-Image-2.5` default. The discovered list feeds the picker; it does not change which deployment name is sent unless you pick one.
 
 ## API behavior
 
@@ -232,6 +232,13 @@ image=<file>
 ```
 
 The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Exactly one source image is supported for edits; additional references are rejected with a clear error. Generated images remain in Hermes' `$HERMES_HOME/cache/images/`. Successful results expose the WebUI-facing `file://` URI in `image` and retain the absolute cached path in `host_image` for Hermes media delivery.
+
+### Retry behavior
+
+- HTTP 429 is always retried, waiting for `Retry-After` (seconds or HTTP-date, capped at 120s). Without the header the wait is about 10s, then 30s, plus jitter, because MAI quotas can be as low as 2 requests per minute.
+- Among 5xx errors only 502 and 503 are retried. 500 and 504 are never retried, since they do not prove a paid generation did not run and a retry could bill twice.
+- At most 3 attempts are made, all within an overall deadline set by `MAI_REQUEST_DEADLINE` (seconds, default 600; also `image_gen.azure-mai.request_deadline` in config.yaml). The plugin never sleeps past the deadline, and each request timeout is shortened to the remaining budget.
+- Connection errors and timeouts are not retried.
 
 ## Disclosure
 
@@ -259,9 +266,9 @@ Source images are the one place this plugin handles untrusted input. Remote refe
 
 - **Scheme allowlist.** Only `https` source references are fetched; anything else is refused.
 - **Address checks.** The host is resolved and every returned address must be public; loopback, private, link-local, reserved and multicast ranges are refused, and the cloud metadata address is blocked regardless of settings. When Hermes' own `tools.url_safety` policy is importable it is used in preference to the built-in check.
-- **Redirects are not followed.** A redirecting source response raises instead of being followed, so a public URL cannot bounce into an internal address.
+- **Redirects are not followed.** A redirecting source response raises instead of being followed, so a public URL cannot bounce into an internal address. Requests are sent with `allow_redirects=False`, and any 3xx status or response with redirect history is refused. Known limitation: the address check resolves the host separately from the fetch, so a DNS-rebinding attacker who controls a hostname's DNS could in principle return a public address for the check and an internal one for the connection; connection-time IP pinning is not implemented.
 - **Byte caps.** A downloaded source image is capped at 50 MiB (`MAX_REMOTE_IMAGE_BYTES`) enforced while streaming, so an oversized body is aborted rather than buffered; the same limit applies to local source files.
-- **Content sniffing.** The source is validated by magic bytes (PNG, JPEG, GIF, WebP) and the authoritative MIME type is taken from the file content, not from the file extension or a caller-supplied type. Non-images are rejected.
+- **Content sniffing.** The source is validated by magic bytes (PNG or JPEG) and the authoritative MIME type is taken from the file content, not from the file extension or a caller-supplied type. Non-images are rejected, and GIF and WebP sources are rejected before upload (`invalid_input`) because MAI accepts only JPEG or PNG source images; convert them first.
 - **Exactly one reference image.** MAI editing takes a single source image. Zero or one is accepted; two or more are rejected with a `too_many_references` error before any request is sent.
 - **Width and height constraints.** Generation uses fixed presets chosen from the resolved aspect ratio and the model family (width and height each ≥ 768; MAI-Image-2.5 family ≤ 1,048,576 pixels, MAI-Image-2.6 family ≤ 2,359,296). 2.5 (default): landscape `1248x832`, square `1024x1024`, portrait `832x1248`. 2.6: landscape `1824x1216`, square `1536x1536`, portrait `1216x1824`. A deployment name containing `2.6` or `2-6` selects the 2.6 sizes; otherwise 2.5 sizes are used. For custom deployment names, set `MAI_IMAGE_SIZE_PROFILE=2.6` (or `2.5`) in the profile `.env`, or `image_gen.azure-mai.size_profile` in `config.yaml`. There is no free-form width/height input.
 
