@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Source images stream into memory (no temp file), local files are size-checked via `stat` before reading, `MAX_REMOTE_IMAGE_BYTES` is renamed `MAX_SOURCE_IMAGE_BYTES`, and the contradictory `agent.file_safety` comment is fixed.
+
 ### Added
 
 - Credential resolution through the Hermes secret scope, so provider settings are read from the
