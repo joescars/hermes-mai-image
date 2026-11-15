@@ -589,3 +589,59 @@ def test_ssrf_guard_fails_closed_when_hermes_policy_raises(monkeypatch):
 
     monkeypatch.setattr(provider, "is_safe_url", boom)
     assert provider._source_url_is_safe("https://images.example/a.png") is False
+
+
+def _fake_response(status, body=None, text=""):
+    class Response:
+        status_code = status
+        headers = {"api-key": "SECRET-KEY"}
+
+        def __init__(self):
+            self.text = text
+
+        def json(self):
+            if body is None:
+                raise ValueError("not json")
+            return body
+
+    return Response()
+
+
+def test_http_400_is_request_rejected_not_deployment(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(
+        _fake_response(400, {"error": {"code": "invalid_size", "message": "bad width"}}), "dep"
+    )
+    assert "equest rejected by MAI" in msg
+    assert "invalid_size" in msg and "bad width" in msg
+    assert "768" in msg and "PNG" in msg
+    assert "not found" not in msg
+
+
+def test_http_404_mentions_deployment_and_endpoint(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(404, {"error": {"message": "x"}}), "my-dep")
+    assert "my-dep" in msg and "exact deployment name" in msg and "endpoint" in msg
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_http_auth_errors_do_not_leak_key(monkeypatch, status):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(status, {"error": {"message": "denied"}}), "dep")
+    assert "authentication" in msg.lower() and "MAI_FOUNDRY_API_KEY" in msg
+    assert "SECRET-KEY" not in msg
+
+
+def test_http_429_mentions_quota_tiers(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(429, {"error": {"message": "slow"}}), "dep")
+    assert "rate limit" in msg.lower() and "tier" in msg.lower()
+
+
+def test_html_body_is_truncated(monkeypatch):
+    provider = load_provider(monkeypatch)
+    html = "<html>" + "x" * 5000 + "</html>"
+    msg = provider._http_error_message(_fake_response(400, None, html), "dep")
+    assert "equest rejected by MAI" in msg
+    assert len(msg) < 1200
+    assert "<html>" not in msg
