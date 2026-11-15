@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in MAI-Image-2.6 `auto_aspect_ratio` and `web_grounding` options (config keys under
+  `image_gen.azure-mai` or `MAI_AUTO_ASPECT_RATIO` / `MAI_WEB_GROUNDING`), sent on generation and
+  edits only when enabled and skipped with a warning on non-2.6 deployments; `web_grounding` is
+  disclosed in the README and catalog. (#22)
 - Credential resolution through the Hermes secret scope, so provider settings are read from the
   active profile's secret store instead of ambient environment lookup.
 - An in-plugin, SSRF-safe image downloader that validates reference image URLs before fetching

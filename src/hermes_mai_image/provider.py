@@ -93,6 +93,8 @@ FALLBACK_MODELS = (
     "MAI-Image-2.5",
 )
 SIZE_PROFILE_ENV = "MAI_IMAGE_SIZE_PROFILE"
+AUTO_ASPECT_RATIO_ENV = "MAI_AUTO_ASPECT_RATIO"
+WEB_GROUNDING_ENV = "MAI_WEB_GROUNDING"
 # MAI-Image-2.5 family: width/height >= 768, width*height <= 1,048,576.
 SIZES_2_5 = {
     "landscape": (1248, 832),
@@ -161,12 +163,34 @@ def _configured_model() -> Optional[str]:
     return str(model).strip() if isinstance(model, str) and model.strip() else None
 
 
-def _sizes_for(model: str) -> Dict[str, Any]:
-    """Pick the size table: explicit override (config, then env), else detect 2.6 in the name."""
+def _is_26_family(model: str) -> bool:
+    """True for MAI-Image-2.6 deployments: explicit size_profile override, else name detection."""
     profile = _setting(SIZE_PROFILE_ENV, "size_profile")
     if profile in ("2.5", "2.6"):
-        return SIZES_2_6 if profile == "2.6" else SIZES_2_5
-    return SIZES_2_6 if re.search(r"2[.\-_]6", model or "") else SIZES_2_5
+        return profile == "2.6"
+    return bool(re.search(r"2[.\-_]6", model or ""))
+
+
+def _sizes_for(model: str) -> Dict[str, Any]:
+    """Pick the size table: explicit override (config, then env), else detect 2.6 in the name."""
+    return SIZES_2_6 if _is_26_family(model) else SIZES_2_5
+
+
+def _enabled_26_options(model: str) -> List[str]:
+    """Names of the opt-in MAI-Image-2.6 booleans that are enabled (default off).
+
+    Sending them to a 2.5 deployment returns 400, so they are skipped with a warning there.
+    """
+    enabled = [
+        key for env, key in ((AUTO_ASPECT_RATIO_ENV, "auto_aspect_ratio"), (WEB_GROUNDING_ENV, "web_grounding"))
+        if _setting(env, key).lower() in ("1", "true", "yes", "on")
+    ]
+    if enabled and not _is_26_family(model):
+        logger.warning(
+            "Ignoring %s: only supported by MAI-Image-2.6 deployments (model %r is not detected as 2.6; "
+            "set MAI_IMAGE_SIZE_PROFILE=2.6 to override).", ", ".join(enabled), model)
+        return []
+    return enabled
 
 
 def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
@@ -606,10 +630,12 @@ class MAIImageProvider(ImageGenProvider):
                     "too_many_references", model)
             if sources:
                 name, data, content_type = _load_source(sources[0])
+                form = {"model": model, "prompt": prompt}
+                form.update({k: "true" for k in _enabled_26_options(model)})
                 response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/edits",
                     headers={"api-key": api_key},
-                    data={"model": model, "prompt": prompt},
+                    data=form,
                     files={"image": (name, data, content_type)},
                     timeout=REQUEST_TIMEOUT,
                 )
@@ -617,10 +643,12 @@ class MAIImageProvider(ImageGenProvider):
             else:
                 sizes = _sizes_for(model)
                 width, height = sizes.get(aspect, sizes["square"])
+                body = {"model": model, "prompt": prompt, "width": width, "height": height}
+                body.update({k: True for k in _enabled_26_options(model)})
                 response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/generations",
                     headers={**_headers(api_key), "Content-Type": "application/json"},
-                    json={"model": model, "prompt": prompt, "width": width, "height": height},
+                    json=body,
                     timeout=REQUEST_TIMEOUT,
                 )
                 modality = "text"

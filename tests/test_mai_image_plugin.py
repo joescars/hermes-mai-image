@@ -806,3 +806,111 @@ def test_request_deadline_resolution(monkeypatch):
     assert provider._request_deadline_seconds() == float(provider.DEFAULT_REQUEST_DEADLINE)
     monkeypatch.setattr(provider, "_plugin_config", lambda: {"request_deadline": "42"})
     assert provider._request_deadline_seconds() == 42.0
+
+
+def _capture_post(monkeypatch, provider):
+    calls = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
+
+    def post(url, **kwargs):
+        calls.update(url=url, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "post", post)
+    return calls
+
+
+def _png(tmp_path):
+    source = tmp_path / "s.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    return str(source)
+
+
+def _gen(provider, model, **kw):
+    return provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model=model
+    ).generate("cat", "square", **kw)
+
+
+@pytest.fixture
+def mai26_env(monkeypatch):
+    provider = load_provider(monkeypatch)
+    for name in ("MAI_AUTO_ASPECT_RATIO", "MAI_WEB_GROUNDING", "MAI_IMAGE_SIZE_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {})
+    return provider
+
+
+def test_26_options_off_by_default_not_sent(monkeypatch, mai26_env, tmp_path):
+    calls = _capture_post(monkeypatch, mai26_env)
+    _gen(mai26_env, "MAI-Image-2.6")
+    assert "auto_aspect_ratio" not in calls["kwargs"]["json"]
+    assert "web_grounding" not in calls["kwargs"]["json"]
+    _gen(mai26_env, "MAI-Image-2.6", image_url=_png(tmp_path))
+    assert set(calls["kwargs"]["data"]) == {"model", "prompt"}
+
+
+def test_26_options_sent_on_generation_via_env(monkeypatch, mai26_env):
+    calls = _capture_post(monkeypatch, mai26_env)
+    monkeypatch.setenv("MAI_AUTO_ASPECT_RATIO", "true")
+    monkeypatch.setenv("MAI_WEB_GROUNDING", "1")
+    _gen(mai26_env, "MAI-Image-2.6")
+    body = calls["kwargs"]["json"]
+    assert body["auto_aspect_ratio"] is True
+    assert body["web_grounding"] is True
+
+
+def test_26_options_sent_on_edits_via_config(monkeypatch, mai26_env, tmp_path):
+    calls = _capture_post(monkeypatch, mai26_env)
+    monkeypatch.setattr(
+        mai26_env, "_plugin_config",
+        lambda: {"auto_aspect_ratio": True, "web_grounding": "yes"})
+    _gen(mai26_env, "mai-image-2-6-flash", image_url=_png(tmp_path))
+    data = calls["kwargs"]["data"]
+    assert data["auto_aspect_ratio"] == "true"
+    assert data["web_grounding"] == "true"
+
+
+def test_26_options_falsey_values_not_sent(monkeypatch, mai26_env):
+    calls = _capture_post(monkeypatch, mai26_env)
+    monkeypatch.setattr(
+        mai26_env, "_plugin_config",
+        lambda: {"auto_aspect_ratio": False, "web_grounding": "off"})
+    _gen(mai26_env, "MAI-Image-2.6")
+    assert "auto_aspect_ratio" not in calls["kwargs"]["json"]
+    assert "web_grounding" not in calls["kwargs"]["json"]
+
+
+def test_26_options_only_one_enabled(monkeypatch, mai26_env):
+    calls = _capture_post(monkeypatch, mai26_env)
+    monkeypatch.setenv("MAI_WEB_GROUNDING", "true")
+    _gen(mai26_env, "MAI-Image-2.6")
+    assert calls["kwargs"]["json"]["web_grounding"] is True
+    assert "auto_aspect_ratio" not in calls["kwargs"]["json"]
+
+
+def test_26_options_skipped_with_warning_on_25(monkeypatch, mai26_env, tmp_path, caplog):
+    calls = _capture_post(monkeypatch, mai26_env)
+    monkeypatch.setenv("MAI_AUTO_ASPECT_RATIO", "true")
+    monkeypatch.setenv("MAI_WEB_GROUNDING", "true")
+    with caplog.at_level("WARNING"):
+        _gen(mai26_env, "MAI-Image-2.5")
+        assert "auto_aspect_ratio" not in calls["kwargs"]["json"]
+        assert "web_grounding" not in calls["kwargs"]["json"]
+        _gen(mai26_env, "MAI-Image-2.5", image_url=_png(tmp_path))
+        assert set(calls["kwargs"]["data"]) == {"model", "prompt"}
+    assert "web_grounding" in caplog.text
+
+
+def test_26_options_size_profile_override_enables(monkeypatch, mai26_env):
+    calls = _capture_post(monkeypatch, mai26_env)
+    monkeypatch.setenv("MAI_IMAGE_SIZE_PROFILE", "2.6")
+    monkeypatch.setenv("MAI_WEB_GROUNDING", "true")
+    _gen(mai26_env, "custom-deployment")
+    assert calls["kwargs"]["json"]["web_grounding"] is True
