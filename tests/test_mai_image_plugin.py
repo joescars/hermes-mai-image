@@ -744,3 +744,12 @@ def test_html_body_is_truncated(monkeypatch):
     assert "equest rejected by MAI" in msg
     assert len(msg) < 1200
     assert "<html>" not in msg
+
+
+def test_request_deadline_resolution(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_REQUEST_DEADLINE", raising=False)
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {})
+    assert provider._request_deadline_seconds() == float(provider.DEFAULT_REQUEST_DEADLINE)
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {"request_deadline": "42"})
+    assert provider._request_deadline_seconds() == 42.0

@@ -237,7 +237,7 @@ The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_im
 
 - HTTP 429 is always retried, waiting for `Retry-After` (seconds or HTTP-date, capped at 120s). Without the header the wait is about 10s, then 30s, plus jitter, because MAI quotas can be as low as 2 requests per minute.
 - Among 5xx errors only 502 and 503 are retried. 500 and 504 are never retried, since they do not prove a paid generation did not run and a retry could bill twice.
-- At most 3 attempts are made, all within an overall deadline set by `MAI_REQUEST_DEADLINE` (seconds, default 600). The plugin never sleeps past the deadline, and each request timeout is shortened to the remaining budget.
+- At most 3 attempts are made, all within an overall deadline set by `MAI_REQUEST_DEADLINE` (seconds, default 600; also `image_gen.azure-mai.request_deadline` in config.yaml). The plugin never sleeps past the deadline, and each request timeout is shortened to the remaining budget.
 - Connection errors and timeouts are not retried.
 
 ## Disclosure

@@ -300,7 +300,7 @@ def _now() -> float:
 def _request_deadline_seconds() -> float:
     """Overall budget for one logical request, retries included (``MAI_REQUEST_DEADLINE``)."""
     try:
-        value = float(_setting(DEADLINE_ENV, str(DEFAULT_REQUEST_DEADLINE)))
+        value = float(_setting(DEADLINE_ENV, "request_deadline", str(DEFAULT_REQUEST_DEADLINE)))
     except (TypeError, ValueError):
         return float(DEFAULT_REQUEST_DEADLINE)
     return value if value > 0 else float(DEFAULT_REQUEST_DEADLINE)
