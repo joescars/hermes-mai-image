@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- GIF and WebP source images are now rejected before upload with `invalid_input` (MAI accepts only
+  JPEG or PNG); README and catalog known issues list the supported formats.
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
 - Provider robustness: HTTP requests to the Foundry MAI endpoints now use retry with backoff, and
