@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Endpoint normalization and validation: pasted `/mai/v1`, `/models`, `/openai/v1` and project URL
+  suffixes resolve to the resource root, bare hosts get `https://`, non-https endpoints fail with
+  `invalid_config` without a request, and model discovery is skipped without credentials.
 - Credential resolution through the Hermes secret scope, so provider settings are read from the
   active profile's secret store instead of ambient environment lookup.
 - An in-plugin, SSRF-safe image downloader that validates reference image URLs before fetching

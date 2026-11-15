@@ -17,7 +17,7 @@ From the Foundry resource's **Keys and Endpoint** page, collect:
 
 - The deployment name assigned to your MAI image model.
 
-Use the resource root as the endpoint. Do **not** append `/mai/v1`; the plugin adds that path. The deployment name is the value sent as the API `model` field and may differ from the catalog model name.
+Use the resource root as the endpoint; the plugin appends `/mai/v1` itself. The endpoint is normalized to `https://host[:port]`: a pasted `/mai/v1`, `/models`, `/openai/v1`, `/api/projects/<name>` suffix, query string or trailing slash is stripped (logged at debug level), and a bare host such as `your-resource.services.ai.azure.com` gets `https://` prepended. A non-`https` endpoint is rejected with an `invalid_config` error and no request is sent. The deployment name is the value sent as the API `model` field and may differ from the catalog model name.
 
 ### 2. Install the plugin into Hermes
 
