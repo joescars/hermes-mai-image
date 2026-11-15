@@ -207,16 +207,23 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     return models
 
 
+class UnsupportedImageFormat(ValueError):
+    """Source is a real image in a format MAI does not accept (not JPEG/PNG)."""
+
+
 def _validate_image_bytes(data: bytes, content_type: str) -> str:
-    """Reject non-images and return the authoritative MIME type from magic bytes."""
+    """Reject non-images and return the authoritative MIME type from magic bytes.
+
+    MAI edits accept only JPEG and PNG sources; GIF/WebP are rejected before upload.
+    """
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if data.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
     if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
+        raise UnsupportedImageFormat("MAI accepts JPEG or PNG source images (received GIF)")
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        return "image/webp"
+        raise UnsupportedImageFormat("MAI accepts JPEG or PNG source images (received WebP)")
     raise ValueError(f"Source is not a supported image (received {content_type or 'unknown type'})")
 
 
@@ -492,6 +499,8 @@ class MAIImageProvider(ImageGenProvider):
             if result.get("success"):
                 result["modality"] = modality
             return result
+        except UnsupportedImageFormat as exc:
+            return _error(self.name, prompt, aspect, str(exc), "invalid_input", model)
         except requests.RequestException as exc:
             logger.debug("MAI request failed", exc_info=True)
             response = getattr(exc, "response", None)

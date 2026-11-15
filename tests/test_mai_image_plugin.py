@@ -238,6 +238,36 @@ def test_source_validation_rejects_non_image(monkeypatch, tmp_path):
         provider._load_source(str(source))
 
 
+@pytest.mark.parametrize(
+    "name,data",
+    [
+        ("anim.gif", b"GIF89a" + b"\x00" * 10),
+        ("old.gif", b"GIF87a" + b"\x00" * 10),
+        ("pic.webp", b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+    ],
+)
+def test_edit_rejects_gif_and_webp_without_posting(monkeypatch, tmp_path, name, data):
+    provider = load_provider(monkeypatch)
+    source = tmp_path / name
+    source.write_bytes(data)
+    posted = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: posted.append(1))
+
+    result = provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
+    ).generate("edit", "square", image_url=str(source))
+
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_input"
+    assert "JPEG or PNG" in result["error"]
+    assert posted == []
+
+
+def test_source_validation_accepts_jpeg(monkeypatch):
+    provider = load_provider(monkeypatch)
+    assert provider._validate_image_bytes(b"\xff\xd8\xff\xe0data", "") == "image/jpeg"
+
+
 def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):
     provider = load_provider(monkeypatch)
     first = tmp_path / "first.png"

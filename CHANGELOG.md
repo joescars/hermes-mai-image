@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- GIF and WebP source images are now rejected before upload with `invalid_input` (MAI accepts only
+  JPEG or PNG); README and catalog known issues list the supported formats.
 - Security: remote source-image downloads no longer follow redirects (`allow_redirects=False`; 3xx and redirect history are rejected), closing an SSRF bypass (#19).
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
