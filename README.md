@@ -233,6 +233,13 @@ image=<file>
 
 The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Exactly one source image is supported for edits; additional references are rejected with a clear error. Generated images remain in Hermes' `$HERMES_HOME/cache/images/`. Successful results expose the WebUI-facing `file://` URI in `image` and retain the absolute cached path in `host_image` for Hermes media delivery.
 
+### Retry behavior
+
+- HTTP 429 is always retried, waiting for `Retry-After` (seconds or HTTP-date, capped at 120s). Without the header the wait is about 10s, then 30s, plus jitter, because MAI quotas can be as low as 2 requests per minute.
+- Among 5xx errors only 502 and 503 are retried. 500 and 504 are never retried, since they do not prove a paid generation did not run and a retry could bill twice.
+- At most 3 attempts are made, all within an overall deadline set by `MAI_REQUEST_DEADLINE` (seconds, default 600; also `image_gen.azure-mai.request_deadline` in config.yaml). The plugin never sleeps past the deadline, and each request timeout is shortened to the remaining budget.
+- Connection errors and timeouts are not retried.
+
 ## Disclosure
 
 This section is the plugin's [catalog rule 13](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md) disclosure — what the plugin does that you should know before installing it.

@@ -114,13 +114,83 @@ def test_generation_retries_rate_limit_and_server_errors(monkeypatch):
                 raise provider.requests.HTTPError(response=self)
         def json(self):
             return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
-    responses.extend([Response(500), Response(429), Response(200)])
+    responses.extend([Response(503), Response(429), Response(200)])
     sleeps = []
     monkeypatch.setattr(provider.time, "sleep", sleeps.append)
     monkeypatch.setattr(provider.requests, "post", lambda *args, **kwargs: responses.pop(0))
     result = provider.MAIImageProvider(api_key="key", endpoint="https://example", model="m").generate("cat")
     assert result["success"] is True
-    assert sleeps == [1, 3]  # exponential backoff, then Retry-After
+    assert 10 <= sleeps[0] <= 13  # no Retry-After: long jittered backoff
+    assert sleeps[1] == 3  # Retry-After seconds honoured
+
+
+class _Resp:
+    def __init__(self, provider, status, headers=None):
+        self._provider = provider
+        self.status_code = status
+        self.headers = headers or {}
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise self._provider.requests.HTTPError(response=self)
+    def json(self):
+        return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
+
+
+def _run_posts(monkeypatch, provider, responses, deadline=None):
+    """Drive generate() with a fake clock; sleep advances it. Returns (result, calls, sleeps)."""
+    clock = [1000.0]
+    sleeps, calls = [], []
+    monkeypatch.setattr(provider, "_now", lambda: clock[0])
+    monkeypatch.setattr(provider.time, "sleep", lambda s: (sleeps.append(s), clock.__setitem__(0, clock[0] + s)))
+    def post(*a, **k):
+        calls.append(k.get("timeout"))
+        return responses.pop(0)
+    monkeypatch.setattr(provider.requests, "post", post)
+    if deadline is not None:
+        monkeypatch.setenv("MAI_REQUEST_DEADLINE", str(deadline))
+    result = provider.MAIImageProvider(api_key="key", endpoint="https://example", model="m").generate("cat")
+    return result, calls, sleeps
+
+
+def test_retry_after_http_date_is_honoured(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+    provider = load_provider(monkeypatch)
+    when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=45), usegmt=True)
+    result, calls, sleeps = _run_posts(monkeypatch, provider, [
+        _Resp(provider, 429, {"Retry-After": when}), _Resp(provider, 200)])
+    assert result["success"] is True
+    assert len(sleeps) == 1 and 40 <= sleeps[0] <= 46
+
+
+@pytest.mark.parametrize("status", [500, 504, 501, 400])
+def test_non_retryable_statuses_are_not_retried(monkeypatch, status):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(monkeypatch, provider, [_Resp(provider, status)])
+    assert result["success"] is False
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_502_is_retried(monkeypatch):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(monkeypatch, provider, [_Resp(provider, 502), _Resp(provider, 200)])
+    assert result["success"] is True and len(calls) == 2
+
+
+def test_deadline_stops_retries_and_never_sleeps_past_it(monkeypatch):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(
+        monkeypatch, provider, [_Resp(provider, 429, {"Retry-After": "50"}) for _ in range(3)], deadline=60)
+    assert result["success"] is False
+    assert len(calls) == 2 and sleeps == [50]  # second wait (50s) would overrun the 60s budget
+
+
+def test_request_timeout_shrinks_to_remaining_budget(monkeypatch):
+    provider = load_provider(monkeypatch)
+    result, calls, sleeps = _run_posts(
+        monkeypatch, provider, [_Resp(provider, 429, {"Retry-After": "50"}), _Resp(provider, 200)], deadline=100)
+    assert result["success"] is True
+    assert calls[0] == 100 and calls[1] == 50
 
 
 def test_generation_retries_stop_at_max(monkeypatch):
@@ -674,3 +744,12 @@ def test_html_body_is_truncated(monkeypatch):
     assert "equest rejected by MAI" in msg
     assert len(msg) < 1200
     assert "<html>" not in msg
+
+
+def test_request_deadline_resolution(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_REQUEST_DEADLINE", raising=False)
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {})
+    assert provider._request_deadline_seconds() == float(provider.DEFAULT_REQUEST_DEADLINE)
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {"request_deadline": "42"})
+    assert provider._request_deadline_seconds() == 42.0

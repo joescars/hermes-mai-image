@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Safer retry policy: 429 is always retried honouring `Retry-After` (seconds or HTTP-date) with a
+  long jittered backoff otherwise; only 502/503 are retried among 5xx (never 500/504, to avoid
+  double billing); retries share an overall `MAI_REQUEST_DEADLINE` budget (default 600s).
 - Honor Hermes secret scope for `MAI_FOUNDRY_API_KEY` (no env fallback inside Hermes); endpoint is a non-secret setting resolvable from `image_gen.azure-mai.*` config or env, and model/models-path are declared optional (#25).
 - HTTP error messages are now accurate per status: 400 reports a rejected request (with the service
   `error.code`/`message` and size/format limits) instead of a missing deployment, 404 covers deployment/endpoint,

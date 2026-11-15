@@ -9,9 +9,12 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import random
 import re
 import tempfile
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
@@ -66,6 +69,12 @@ except ImportError:  # pragma: no cover - only for standalone import outside Her
 MAX_REMOTE_IMAGE_BYTES = 50 * 1024 * 1024
 REMOTE_TIMEOUT = (5, 15)
 MAX_REQUEST_ATTEMPTS = 3
+# 429 always; 502/503 only. 500/504 are never retried: a paid generation may have run.
+RETRYABLE_STATUSES = frozenset({429, 502, 503})
+RATE_LIMIT_BACKOFF = (10.0, 30.0)  # seconds, before jitter; MAI tier-1 is ~2 RPM
+MAX_RETRY_AFTER = 120.0
+DEADLINE_ENV = "MAI_REQUEST_DEADLINE"
+DEFAULT_REQUEST_DEADLINE = 600  # seconds for one request including retries
 
 DEFAULT_ENDPOINT = ""
 DEFAULT_MODEL = "MAI-Image-2.5"
@@ -283,28 +292,75 @@ def _validate_image_bytes(data: bytes, content_type: str) -> str:
     raise ValueError(f"Source is not a supported image (received {content_type or 'unknown type'})")
 
 
+def _now() -> float:
+    """Monotonic clock for the request deadline (a seam so tests never sleep)."""
+    return time.monotonic()
+
+
+def _request_deadline_seconds() -> float:
+    """Overall budget for one logical request, retries included (``MAI_REQUEST_DEADLINE``)."""
+    try:
+        value = float(_setting(DEADLINE_ENV, "request_deadline", str(DEFAULT_REQUEST_DEADLINE)))
+    except (TypeError, ValueError):
+        return float(DEFAULT_REQUEST_DEADLINE)
+    return value if value > 0 else float(DEFAULT_REQUEST_DEADLINE)
+
+
+def _parse_retry_after(raw: Any) -> Optional[float]:
+    """Parse ``Retry-After`` as delta-seconds or an HTTP-date; ``None`` when unusable."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
 def _retry_delay(response: Any, attempt: int) -> float:
-    """Seconds to wait before retry ``attempt`` (1-based): ``Retry-After``, else 2**(attempt-1)."""
+    """Seconds to wait before retry ``attempt`` (1-based).
+
+    Honours ``Retry-After`` (seconds or HTTP-date, capped); otherwise a long backoff with
+    jitter sized for MAI's low requests-per-minute quotas (~10s, then ~30s).
+    """
     headers = getattr(response, "headers", None) or {}
     raw = headers.get("Retry-After") if hasattr(headers, "get") else None
-    try:
-        if raw is not None:
-            return max(0.0, min(float(raw), 60.0))
-    except (TypeError, ValueError):
-        pass
-    return float(2 ** (attempt - 1))
+    parsed = _parse_retry_after(raw)
+    if parsed is not None:
+        return min(parsed, MAX_RETRY_AFTER)
+    base = RATE_LIMIT_BACKOFF[min(attempt, len(RATE_LIMIT_BACKOFF)) - 1]
+    return base + random.uniform(0, base * 0.25)
 
 
 def _post_with_retry(url: str, **kwargs: Any):
-    """``requests.post`` with bounded retry on 429/5xx; returns the final response."""
+    """``requests.post`` with bounded retry; returns the final response.
+
+    Retries 429 (always) and 502/503. Never 500/504: those do not prove the paid generation
+    did not run. All attempts and waits share one deadline; per-request timeout is clamped
+    to the remaining budget and we never sleep past it.
+    """
+    deadline = _now() + _request_deadline_seconds()
+    base_timeout = kwargs.pop("timeout", REQUEST_TIMEOUT)
     response = None
     for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
-        response = requests.post(url, **kwargs)
+        remaining = deadline - _now()
+        response = requests.post(url, timeout=min(base_timeout, remaining), **kwargs)
         status = getattr(response, "status_code", None)
-        retryable = isinstance(status, int) and (status == 429 or 500 <= status < 600)
-        if not retryable or attempt == MAX_REQUEST_ATTEMPTS:
+        if status not in RETRYABLE_STATUSES or attempt == MAX_REQUEST_ATTEMPTS:
             return response
-        time.sleep(_retry_delay(response, attempt))
+        delay = _retry_delay(response, attempt)
+        if _now() + delay >= deadline:
+            return response
+        time.sleep(delay)
     return response
 
 
