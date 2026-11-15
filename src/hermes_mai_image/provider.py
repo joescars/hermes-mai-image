@@ -90,13 +90,26 @@ SIZES = {
 }
 
 
-def _setting(name: str, default: str = "") -> str:
-    value = get_secret(name) if get_secret is not None else None
-    return (value or os.environ.get(name) or default).strip()
+def _secret(name: str) -> str:
+    """Resolve a secret. Inside Hermes only the profile-scoped ``get_secret`` is used
+    (no ``os.environ`` fallback, which could leak another profile's key under
+    multiplexing). ``os.environ`` is read only when running outside Hermes."""
+    if get_secret is not None:
+        return (get_secret(name) or "").strip()
+    return (os.environ.get(name) or "").strip()
+
+
+def _setting(name: str, config_key: str, default: str = "") -> str:
+    """Resolve a non-secret setting: ``image_gen.azure-mai.<config_key>`` in config.yaml,
+    then the ``name`` environment variable, then ``default``."""
+    scoped = _plugin_config().get(config_key)
+    if scoped is not None and str(scoped).strip():
+        return str(scoped).strip()
+    return (os.environ.get(name) or default).strip()
 
 
 def _endpoint(endpoint: Optional[str] = None) -> str:
-    return (endpoint or _setting(ENDPOINT_ENV, DEFAULT_ENDPOINT)).rstrip("/")
+    return (endpoint or _setting(ENDPOINT_ENV, "endpoint", DEFAULT_ENDPOINT)).rstrip("/")
 
 
 def _headers(api_key: str) -> Dict[str, str]:
@@ -112,6 +125,12 @@ def _load_image_gen_config() -> Dict[str, Any]:
         return {}
 
 
+def _plugin_config() -> Dict[str, Any]:
+    section = _load_image_gen_config().get("image_gen")
+    scoped = section.get("azure-mai") if isinstance(section, dict) else None
+    return scoped if isinstance(scoped, dict) else {}
+
+
 def _configured_model() -> Optional[str]:
     config = _load_image_gen_config()
     section = config.get("image_gen") if isinstance(config, dict) else None
@@ -125,7 +144,7 @@ def _configured_model() -> Optional[str]:
 
 
 def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
-    return str(explicit or override or _setting(MODEL_ENV) or _configured_model() or DEFAULT_MODEL)
+    return str(explicit or override or _setting(MODEL_ENV, "model") or _configured_model() or DEFAULT_MODEL)
 
 
 _MAX_ERROR_DETAIL = 500
@@ -198,7 +217,7 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     Foundry resources expose ``/models`` and some do not, so callers must use
     the fallback catalog when this returns an empty list.
     """
-    path = _setting(DISCOVERY_PATH_ENV, "/models")
+    path = _setting(DISCOVERY_PATH_ENV, "models_path", "/models")
     if not path.startswith("/"):
         path = "/" + path
     try:
@@ -443,7 +462,7 @@ class MAIImageProvider(ImageGenProvider):
 
     def _credentials(self) -> tuple[str, str]:
         return (
-            self.api_key_override if self.api_key_override is not None else _setting(API_KEY_ENV),
+            self.api_key_override if self.api_key_override is not None else _secret(API_KEY_ENV),
             _endpoint(self.endpoint_override),
         )
 

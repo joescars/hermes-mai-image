@@ -104,7 +104,7 @@ MAI_FOUNDRY_ENDPOINT
 
 **Credential handling.** The plugin reads `MAI_FOUNDRY_API_KEY` and `MAI_FOUNDRY_ENDPOINT` through Hermes secret scope for the **active profile** — the values are resolved in the context of the profile that is running, so a second profile cannot pick them up accidentally. The values live in the active profile's `.env` under `$HERMES_HOME/profiles/<profile>/.env` (the default profile's `.env` sits at `$HERMES_HOME/.env`). The API key is sent to your Foundry resource in the `api-key` header on each request and is never logged, never written by the plugin anywhere else, and never included in image metadata.
 
-Never put API keys in `config.yaml`, chat messages, or Git. `config.yaml` holds only non-secret model selection, not credentials.
+Never put API keys in `config.yaml`, chat messages, or Git. Only `MAI_FOUNDRY_API_KEY` is a secret: inside Hermes it is read solely from the active profile's secret scope (a same-named process environment variable is ignored); outside Hermes it falls back to the environment. The endpoint, model and discovery path are non-secret and can instead be set in `config.yaml` under `image_gen.azure-mai` as `endpoint`, `model` and `models_path` (config wins over the `MAI_FOUNDRY_ENDPOINT`, `MAI_IMAGE_MODEL`, `MAI_FOUNDRY_MODELS_PATH` env vars; `MAI_IMAGE_MODEL` and `MAI_FOUNDRY_MODELS_PATH` are optional). `config.yaml` holds only non-secret model selection, not credentials.
 
 If the provider does not appear, restart the dashboard after installing the package. A browser refresh alone does not reload Python plugins.
 
@@ -152,7 +152,7 @@ MAI_FOUNDRY_ENDPOINT=https://your-resource.services.ai.azure.com
 MAI_IMAGE_MODEL=your-deployment-name
 ```
 
-Never put API keys in `config.yaml`, chat messages, or Git. `MAI_IMAGE_MODEL` defaults to `MAI-Image-2.5` if omitted, but the exact deployment name is recommended.
+Never put API keys in `config.yaml`, chat messages, or Git. Only `MAI_FOUNDRY_API_KEY` is a secret: inside Hermes it is read solely from the active profile's secret scope (a same-named process environment variable is ignored); outside Hermes it falls back to the environment. The endpoint, model and discovery path are non-secret and can instead be set in `config.yaml` under `image_gen.azure-mai` as `endpoint`, `model` and `models_path` (config wins over the `MAI_FOUNDRY_ENDPOINT`, `MAI_IMAGE_MODEL`, `MAI_FOUNDRY_MODELS_PATH` env vars; `MAI_IMAGE_MODEL` and `MAI_FOUNDRY_MODELS_PATH` are optional). `MAI_IMAGE_MODEL` defaults to `MAI-Image-2.5` if omitted, but the exact deployment name is recommended.
 
 ### 8. Test generation
 
@@ -209,7 +209,7 @@ MAI-Image-2.5
 MAI_FOUNDRY_MODELS_PATH=/models
 ```
 
-The model actually sent to MAI is resolved in this order: an explicit per-request model, then `MAI_IMAGE_MODEL` from the active profile's `.env`, then the model set in `config.yaml` (`image_gen.model` or `image_gen.azure-mai.model`), then the `MAI-Image-2.5` default. The discovered list feeds the picker; it does not change which deployment name is sent unless you pick one.
+The model actually sent to MAI is resolved in this order: an explicit per-request model, then `image_gen.azure-mai.model` in `config.yaml`, then `MAI_IMAGE_MODEL` from the environment, then `image_gen.model`, then the `MAI-Image-2.5` default. The discovered list feeds the picker; it does not change which deployment name is sent unless you pick one.
 
 ## API behavior
 

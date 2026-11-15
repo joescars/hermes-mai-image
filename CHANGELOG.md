@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Honor Hermes secret scope for `MAI_FOUNDRY_API_KEY` (no env fallback inside Hermes); endpoint is a non-secret setting resolvable from `image_gen.azure-mai.*` config or env, and model/models-path are declared optional (#25).
 - HTTP error messages are now accurate per status: 400 reports a rejected request (with the service
   `error.code`/`message` and size/format limits) instead of a missing deployment, 404 covers deployment/endpoint,
   401/403 give authentication guidance, 429 mentions quota tiers, and detail is truncated to ~500 characters (#18).
