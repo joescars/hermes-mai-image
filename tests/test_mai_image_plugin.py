@@ -234,7 +234,7 @@ def test_generation_uses_mai_endpoint_and_api_key(monkeypatch):
     assert calls["url"].endswith("/mai/v1/images/generations")
     assert calls["kwargs"]["headers"]["api-key"] == "key"
     assert calls["kwargs"]["json"] == {
-        "model": "deployment", "prompt": "a blue bird", "width": 1536, "height": 1024
+        "model": "deployment", "prompt": "a blue bird", "width": 1248, "height": 832
     }
 
 
@@ -688,6 +688,59 @@ def test_ssrf_guard_fails_closed_when_hermes_policy_raises(monkeypatch):
 
     monkeypatch.setattr(provider, "is_safe_url", boom)
     assert provider._source_url_is_safe("https://images.example/a.png") is False
+
+
+def _capture_size(monkeypatch, model, aspect, env=None, config=None):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_SIZE_PROFILE", raising=False)
+    for k, v in (env or {}).items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: config or {})
+    calls = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
+
+    def post(url, **kwargs):
+        calls.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "post", post)
+    provider.MAIImageProvider(api_key="k", endpoint="https://e.services.ai.azure.com", model=model).generate("p", aspect)
+    return calls["json"]["width"], calls["json"]["height"]
+
+
+@pytest.mark.parametrize("model,aspect,expected", [
+    ("MAI-Image-2.5", "landscape", (1248, 832)),
+    ("MAI-Image-2.5-Pro", "portrait", (832, 1248)),
+    ("my-deployment", "square", (1024, 1024)),
+    ("MAI-Image-2.6", "landscape", (1824, 1216)),
+    ("mai-image-2-6-flash", "portrait", (1216, 1824)),
+    ("MAI-Image-2.6", "square", (1536, 1536)),
+])
+def test_sizes_are_model_aware(monkeypatch, model, aspect, expected):
+    assert _capture_size(monkeypatch, model, aspect) == expected
+
+
+def test_size_profile_env_override(monkeypatch):
+    assert _capture_size(monkeypatch, "prod-deploy", "landscape", env={"MAI_IMAGE_SIZE_PROFILE": "2.6"}) == (1824, 1216)
+    assert _capture_size(monkeypatch, "MAI-Image-2.6", "landscape", env={"MAI_IMAGE_SIZE_PROFILE": "2.5"}) == (1248, 832)
+
+
+def test_size_profile_config_override(monkeypatch):
+    cfg = {"image_gen": {"azure-mai": {"size_profile": "2.6"}}}
+    assert _capture_size(monkeypatch, "prod-deploy", "portrait", config=cfg) == (1216, 1824)
+
+
+def test_all_sizes_within_limits(monkeypatch):
+    provider = load_provider(monkeypatch)
+    for table, limit in ((provider.SIZES_2_5, 1048576), (provider.SIZES_2_6, 2359296)):
+        for w, h in table.values():
+            assert w >= 768 and h >= 768 and w * h <= limit
 
 
 def _fake_response(status, body=None, text=""):

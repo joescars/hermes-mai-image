@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Image sizes are now model-aware: MAI-Image-2.5 models use presets within the 1,048,576-pixel limit
+  (landscape `1248x832`, portrait `832x1248`); 2.6 deployments (detected from the name, or via
+  `MAI_IMAGE_SIZE_PROFILE` / `image_gen.azure-mai.size_profile` = `2.5`/`2.6`) use larger presets. (#17)
 - Safer retry policy: 429 is always retried honouring `Retry-After` (seconds or HTTP-date) with a
   long jittered backoff otherwise; only 502/503 are retried among 5xx (never 500/504, to avoid
   double billing); retries share an overall `MAI_REQUEST_DEADLINE` budget (default 600s).

@@ -92,11 +92,20 @@ FALLBACK_MODELS = (
     "MAI-Image-2.5-Flash",
     "MAI-Image-2.5",
 )
-SIZES = {
-    "landscape": (1536, 1024),
+SIZE_PROFILE_ENV = "MAI_IMAGE_SIZE_PROFILE"
+# MAI-Image-2.5 family: width/height >= 768, width*height <= 1,048,576.
+SIZES_2_5 = {
+    "landscape": (1248, 832),
     "square": (1024, 1024),
-    "portrait": (1024, 1536),
+    "portrait": (832, 1248),
 }
+# MAI-Image-2.6 family: width/height >= 768, width*height <= 2,359,296.
+SIZES_2_6 = {
+    "landscape": (1824, 1216),
+    "square": (1536, 1536),
+    "portrait": (1216, 1824),
+}
+SIZES = SIZES_2_5
 
 
 def _secret(name: str) -> str:
@@ -150,6 +159,14 @@ def _configured_model() -> Optional[str]:
         return str(scoped["model"]).strip()
     model = section.get("model")
     return str(model).strip() if isinstance(model, str) and model.strip() else None
+
+
+def _sizes_for(model: str) -> Dict[str, Any]:
+    """Pick the size table: explicit override (config, then env), else detect 2.6 in the name."""
+    profile = _setting(SIZE_PROFILE_ENV, "size_profile")
+    if profile in ("2.5", "2.6"):
+        return SIZES_2_6 if profile == "2.6" else SIZES_2_5
+    return SIZES_2_6 if re.search(r"2[.\-_]6", model or "") else SIZES_2_5
 
 
 def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
@@ -598,7 +615,8 @@ class MAIImageProvider(ImageGenProvider):
                 )
                 modality = "image"
             else:
-                width, height = SIZES.get(aspect, SIZES["square"])
+                sizes = _sizes_for(model)
+                width, height = sizes.get(aspect, sizes["square"])
                 response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/generations",
                     headers={**_headers(api_key), "Content-Type": "application/json"},
