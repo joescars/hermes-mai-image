@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Safer retry policy: 429 is always retried honouring `Retry-After` (seconds or HTTP-date) with a
+  long jittered backoff otherwise; only 502/503 are retried among 5xx (never 500/504, to avoid
+  double billing); retries share an overall `MAI_REQUEST_DEADLINE` budget (default 600s).
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
 - Provider robustness: HTTP requests to the Foundry MAI endpoints now use retry with backoff, and
