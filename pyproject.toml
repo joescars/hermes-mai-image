@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,17 +8,19 @@ version = "0.1.2"
 description = "Microsoft Foundry MAI image generation backend for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Hermes community" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "joescars" }]
 keywords = ["hermes-agent", "microsoft-foundry", "azure", "mai", "image-generation"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Topic :: Multimedia :: Graphics",
 ]
 dependencies = ["requests>=2.28"]
@@ -30,6 +32,7 @@ Issues = "https://github.com/joescars/hermes-mai-image/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pyyaml>=6", "tomli>=2; python_version < '3.11'"]
+lint = ["ruff>=0.8"]
 
 [project.entry-points."hermes_agent.plugins"]
 azure-mai-image = "hermes_mai_image"
@@ -41,3 +44,17 @@ include = ["src/hermes_mai_image/plugin.yaml"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+# Pyflakes plus the pycodestyle error subset that does not depend on line length.
+# Style rules (E501, UP, I, ...) are deliberately off: enabling them needs a repo-wide
+# reformat, which is a separate follow-up.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Pre-existing unused imports in the test module. Left unfixed here to avoid conflicts with
+# in-flight test changes; remove this ignore once they are cleaned up.
+"tests/test_mai_image_plugin.py" = ["F401"]

@@ -11,7 +11,6 @@ import mimetypes
 import os
 import random
 import re
-import tempfile
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -44,8 +43,6 @@ try:
     # reference image from reading a credential store. Tracked upstream at
     # NousResearch/hermes-agent#155704 (request to publish a public seam for this and for
     # image fetching).
-    # Documented file-safety seam: blocks reading credentials and other protected paths
-    # when a local reference image is supplied. Published in the plugin API docs.
     from agent.file_safety import raise_if_read_blocked
 except ImportError:  # pragma: no cover - only for standalone import outside Hermes
     def raise_if_read_blocked(_path: str) -> None:
@@ -66,9 +63,9 @@ try:
 except ImportError:  # pragma: no cover - only for standalone import outside Hermes
     get_secret = None
 
-MAX_REMOTE_IMAGE_BYTES = 50 * 1024 * 1024
+MAX_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_REFERENCE_IMAGES = 5  # MAI edits accept up to five repeated `image` fields
-MAX_TOTAL_UPLOAD_BYTES = MAX_REFERENCE_IMAGES * MAX_REMOTE_IMAGE_BYTES
+MAX_TOTAL_UPLOAD_BYTES = MAX_REFERENCE_IMAGES * MAX_SOURCE_IMAGE_BYTES
 REMOTE_TIMEOUT = (5, 15)
 MAX_REQUEST_ATTEMPTS = 3
 # 429 always; 502/503 only. 500/504 are never retried: a paid generation may have run.
@@ -78,7 +75,6 @@ MAX_RETRY_AFTER = 120.0
 DEADLINE_ENV = "MAI_REQUEST_DEADLINE"
 DEFAULT_REQUEST_DEADLINE = 600  # seconds for one request including retries
 
-DEFAULT_ENDPOINT = ""
 DEFAULT_MODEL = "MAI-Image-2.5"
 MODEL_ENV = "MAI_IMAGE_MODEL"
 API_KEY_ENV = "MAI_FOUNDRY_API_KEY"
@@ -128,8 +124,48 @@ def _setting(name: str, config_key: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+_ENDPOINT_NOTICES: set = set()
+
+
 def _endpoint(endpoint: Optional[str] = None) -> str:
-    return (endpoint or _setting(ENDPOINT_ENV, "endpoint", DEFAULT_ENDPOINT)).rstrip("/")
+    """Return the Foundry resource root (``scheme://host[:port]``) for the configured endpoint.
+
+    Common pasted forms are normalized: a missing scheme gets ``https://`` prepended, and
+    ``/mai/v1``, ``/models``, ``/openai[/v1]``, ``/api/projects/<name>``, query strings and
+    trailing slashes are dropped. A non-https scheme is preserved so callers can reject it
+    (see ``_endpoint_problem``). Empty input yields ``""``.
+    """
+    raw = (endpoint or _setting(ENDPOINT_ENV, "endpoint", "")).strip()
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"https://{raw}"
+    try:
+        parts = urlsplit(candidate)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return raw.rstrip("/")
+    if not host:
+        return raw.rstrip("/")
+    if ":" in host:
+        host = f"[{host}]"
+    normalized = f"{parts.scheme.lower()}://{host}{port}"
+    if normalized != raw:
+        # Never log the raw value: it may carry userinfo or query credentials.
+        if normalized not in _ENDPOINT_NOTICES:
+            _ENDPOINT_NOTICES.add(normalized)
+            logger.debug("MAI endpoint normalized to resource root %s", normalized)
+    return normalized
+
+
+def _endpoint_problem(endpoint: str) -> str:
+    """Return a user-facing message if ``endpoint`` (already normalized) is unusable, else ``""``."""
+    if endpoint and not endpoint.startswith("https://"):
+        return (
+            f"{ENDPOINT_ENV} must be an https:// Foundry resource root "
+            "(for example https://your-resource.services.ai.azure.com)"
+        )
+    return ""
 
 
 def _headers(api_key: str) -> Dict[str, str]:
@@ -426,8 +462,8 @@ def _source_url_is_safe(url: str) -> bool:
     return _address_is_public(parts.hostname or "")
 
 
-def _download_remote_image(url: str, destination: Path) -> Path:
-    """Download a remote source image safely.
+def _download_remote_image(url: str) -> bytes:
+    """Download a remote source image safely into memory and return its bytes.
 
     Validation goes through Hermes' published URL-safety helper
     (``tools.url_safety.is_safe_url``, listed in ``plugin_api.json``), which blocks
@@ -446,7 +482,8 @@ def _download_remote_image(url: str, destination: Path) -> Path:
     if not _source_url_is_safe(url):
         raise ValueError("Remote image URL resolves to a private, internal or blocked address")
 
-    total = 0
+    buffer = bytearray()
+    validated = False
     with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT, allow_redirects=False) as response:
         if (
             response.is_redirect
@@ -457,16 +494,18 @@ def _download_remote_image(url: str, destination: Path) -> Path:
             raise ValueError("Remote image may not redirect")
         if response.status_code >= 400:
             raise ValueError(f"Image download failed with HTTP {response.status_code}")
-        with destination.open("wb") as output:
-            for chunk in response.iter_content(chunk_size=64 * 1024):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > MAX_REMOTE_IMAGE_BYTES:
-                    raise ValueError(f"Image exceeds {MAX_REMOTE_IMAGE_BYTES} byte limit")
-                output.write(chunk)
-    _validate_image_bytes(destination.read_bytes()[:16], "")
-    return destination
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            if len(buffer) + len(chunk) > MAX_SOURCE_IMAGE_BYTES:
+                raise ValueError(f"Image exceeds {MAX_SOURCE_IMAGE_BYTES} byte limit")
+            buffer.extend(chunk)
+            if not validated and len(buffer) >= 16:
+                _validate_image_bytes(bytes(buffer[:16]), "")
+                validated = True
+    if not validated:
+        _validate_image_bytes(bytes(buffer[:16]), "")
+    return bytes(buffer)
 
 
 def _load_source(source: str):
@@ -474,14 +513,7 @@ def _load_source(source: str):
     source = source.strip()
     if source.startswith(("http://", "https://")):
         filename = Path(urlsplit(source).path).name or "reference.png"
-        suffix = Path(filename).suffix or ".img"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-            temp_path = Path(handle.name)
-        try:
-            _download_remote_image(source, temp_path)
-            data = temp_path.read_bytes()
-        finally:
-            temp_path.unlink(missing_ok=True)
+        data = _download_remote_image(source)
         content_type = mimetypes.guess_type(filename)[0] or "image/png"
         content_type = _validate_image_bytes(data, content_type)
         return filename, data, content_type
@@ -490,9 +522,9 @@ def _load_source(source: str):
     raise_if_read_blocked(str(path))  # credential-read guard before local bytes (see import site)
     if not path.is_file():
         raise FileNotFoundError(source)
+    if path.stat().st_size > MAX_SOURCE_IMAGE_BYTES:
+        raise ValueError(f"Image exceeds {MAX_SOURCE_IMAGE_BYTES} byte limit")
     data = path.read_bytes()
-    if len(data) > MAX_REMOTE_IMAGE_BYTES:
-        raise ValueError(f"Image exceeds {MAX_REMOTE_IMAGE_BYTES} byte limit")
     content_type = mimetypes.guess_type(path.name)[0] or "image/png"
     content_type = _validate_image_bytes(data, content_type)
     return path.name, data, content_type
@@ -551,17 +583,37 @@ class MAIImageProvider(ImageGenProvider):
 
     def is_available(self) -> bool:
         api_key, endpoint = self._credentials()
-        return bool(api_key and endpoint)
+        return bool(api_key and endpoint and not _endpoint_problem(endpoint))
 
     def list_models(self) -> List[Dict[str, str]]:
         api_key, endpoint = self._credentials()
+        if self._models is None and (not api_key or not endpoint or _endpoint_problem(endpoint)):
+            return [{"id": model, "display": model} for model in FALLBACK_MODELS]
         if self._models is None:
             try:
                 self._models = discover_models(endpoint, api_key)
             except Exception as exc:
                 logger.debug("MAI model discovery unavailable: %s", exc)
                 self._models = []
-        return self._models or [{"id": model, "display": model} for model in FALLBACK_MODELS]
+        # The id is always the bare deployment name sent as the API ``model``. Hermes shows
+        # ``display`` in the Web UI and ``strengths`` as a picker column, so labels go there.
+        entries = self._models or [
+            {
+                "id": model,
+                "display": f"{model} (model name \u2014 must match your deployment name)",
+                "strengths": "model name; must match your deployment name",
+            }
+            for model in FALLBACK_MODELS
+        ]
+        configured = self.model_override or _setting(MODEL_ENV, "model") or _configured_model()
+        if not configured:
+            return entries
+        first = {
+            "id": configured,
+            "display": f"{configured} (configured deployment)",
+            "strengths": "your configured deployment",
+        }
+        return [first] + [entry for entry in entries if entry.get("id") != configured]
 
     def default_model(self) -> Optional[str]:
         return _resolve_model(None, self.model_override)
@@ -597,6 +649,9 @@ class MAIImageProvider(ImageGenProvider):
             return _error(self.name, prompt, aspect, "Prompt is required", "invalid_input", model)
         if not api_key or not endpoint:
             return _error(self.name, prompt, aspect, f"Set {API_KEY_ENV} and {ENDPOINT_ENV}", "auth_required", model)
+        problem = _endpoint_problem(endpoint)
+        if problem:
+            return _error(self.name, prompt, aspect, problem, "invalid_config", model)
 
         sources = ([image_url] if image_url else []) + list(reference_image_urls or [])
         try:

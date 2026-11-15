@@ -17,7 +17,7 @@ From the Foundry resource's **Keys and Endpoint** page, collect:
 
 - The deployment name assigned to your MAI image model.
 
-Use the resource root as the endpoint. Do **not** append `/mai/v1`; the plugin adds that path. The deployment name is the value sent as the API `model` field and may differ from the catalog model name.
+Use the resource root as the endpoint; the plugin appends `/mai/v1` itself. The endpoint is normalized to `https://host[:port]`: a pasted `/mai/v1`, `/models`, `/openai/v1`, `/api/projects/<name>` suffix, query string or trailing slash is stripped (logged at debug level), and a bare host such as `your-resource.services.ai.azure.com` gets `https://` prepended. A non-`https` endpoint is rejected with an `invalid_config` error and no request is sent. The deployment name is the value sent as the API `model` field and may differ from the catalog model name.
 
 ### 2. Install the plugin into Hermes
 
@@ -184,16 +184,14 @@ The edit request uses MAI's `/mai/v1/images/edits` multipart endpoint.
 
 ## Model discovery
 
-The provider discovers the models available on your Foundry resource at runtime by calling the resource's `/models` route:
+**The `model` sent to MAI is your Foundry *deployment name*, not necessarily a base model name.** Picking `MAI-Image-2.6` works only if your deployment is literally named `MAI-Image-2.6`; otherwise MAI returns 404.
 
-```text
-GET {endpoint}/models
-api-key: ***
-```
+Discovery is best-effort and unverified. The provider calls `GET {endpoint}/models` with the `api-key` header and reads a `data` (or `models`) array. Microsoft's MAI documentation lists deployments only through the Azure management plane, and we could not confirm that `/models` returns MAI deployments on a real resource, so in practice you will usually see the fallback list. Discovered entries that do not look like image models are labelled `(unverified: may not be an image model)`.
 
-The response is read for a `data` array (or a `models` array) of entries; each entry's `id`/`name`/`model` becomes the model id and `display_name`/`name` becomes the label. Discovery is best-effort — not every Foundry resource exposes `/models`, and MAI generation itself does not require it.
+What the picker shows:
 
-When discovery is unavailable, returns nothing, or fails, the provider falls back to a built-in MAI catalog:
+1. Your configured deployment (explicit model, `image_gen.azure-mai.model`, `MAI_IMAGE_MODEL`, or `image_gen.model`) is always listed first, labelled `(configured deployment)`, and de-duplicated against the rest.
+2. Discovered entries, if any; otherwise the built-in fallback catalog, labelled `(model name — must match your deployment name)`:
 
 ```text
 MAI-Image-2.6-Flash
@@ -203,13 +201,25 @@ MAI-Image-2.5-Flash
 MAI-Image-2.5
 ```
 
+Labels appear only in the display/description columns; the id saved to config and sent to the API is always the bare name.
+
+**List your real deployment names** with the Azure CLI:
+
+```bash
+az cognitiveservices account deployment list \
+  --name <resource-name> --resource-group <resource-group> \
+  --query "[].name" -o tsv
+```
+
+Set one of those as the model (`MAI_IMAGE_MODEL` or `image_gen.azure-mai.model`) if it differs from the fallback names.
+
 **Overriding the discovery path.** Set `MAI_FOUNDRY_MODELS_PATH` to point discovery at a different route on the same resource. A value without a leading `/` is normalised by adding one:
 
 ```dotenv
 MAI_FOUNDRY_MODELS_PATH=/models
 ```
 
-The model actually sent to MAI is resolved in this order: an explicit per-request model, then `image_gen.azure-mai.model` in `config.yaml`, then `MAI_IMAGE_MODEL` from the environment, then `image_gen.model`, then the `MAI-Image-2.5` default. The discovered list feeds the picker; it does not change which deployment name is sent unless you pick one.
+The model actually sent to MAI is resolved in this order: an explicit per-request model, then `image_gen.azure-mai.model` in `config.yaml`, then `MAI_IMAGE_MODEL` from the environment, then `image_gen.model`, then the `MAI-Image-2.5` default. The picker list does not change which deployment name is sent unless you pick one.
 
 ## API behavior
 
@@ -267,7 +277,7 @@ Source images are the one place this plugin handles untrusted input. Remote refe
 - **Scheme allowlist.** Only `https` source references are fetched; anything else is refused.
 - **Address checks.** The host is resolved and every returned address must be public; loopback, private, link-local, reserved and multicast ranges are refused, and the cloud metadata address is blocked regardless of settings. When Hermes' own `tools.url_safety` policy is importable it is used in preference to the built-in check.
 - **Redirects are not followed.** A redirecting source response raises instead of being followed, so a public URL cannot bounce into an internal address. Requests are sent with `allow_redirects=False`, and any 3xx status or response with redirect history is refused. Known limitation: the address check resolves the host separately from the fetch, so a DNS-rebinding attacker who controls a hostname's DNS could in principle return a public address for the check and an internal one for the connection; connection-time IP pinning is not implemented.
-- **Byte caps.** A downloaded source image is capped at 50 MiB (`MAX_REMOTE_IMAGE_BYTES`) enforced while streaming, so an oversized body is aborted rather than buffered; the same limit applies to local source files.
+- **Byte caps.** A downloaded source image is capped at 50 MiB (`MAX_SOURCE_IMAGE_BYTES`) enforced while streaming, so an oversized body is aborted rather than buffered; the same limit applies to local source files.
 - **Content sniffing.** The source is validated by magic bytes (PNG or JPEG) and the authoritative MIME type is taken from the file content, not from the file extension or a caller-supplied type. Non-images are rejected, and GIF and WebP sources are rejected before upload (`invalid_input`) because MAI accepts only JPEG or PNG source images; convert them first.
 - **Up to five reference images.** MAI editing takes at most five JPEG/PNG source images. Six or more are rejected with a `too_many_references` error before any request is sent, and the total upload across sources is capped at 250 MB.
 - **Width and height constraints.** Generation uses fixed presets chosen from the resolved aspect ratio and the model family (width and height each ≥ 768; MAI-Image-2.5 family ≤ 1,048,576 pixels, MAI-Image-2.6 family ≤ 2,359,296). 2.5 (default): landscape `1248x832`, square `1024x1024`, portrait `832x1248`. 2.6: landscape `1824x1216`, square `1536x1536`, portrait `1216x1824`. A deployment name containing `2.6` or `2-6` selects the 2.6 sizes; otherwise 2.5 sizes are used. For custom deployment names, set `MAI_IMAGE_SIZE_PROFILE=2.6` (or `2.5`) in the profile `.env`, or `image_gen.azure-mai.size_profile` in `config.yaml`. There is no free-form width/height input.
