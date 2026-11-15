@@ -17,6 +17,8 @@ optional_env:
   - MAI_FOUNDRY_MODELS_PATH
   - MAI_IMAGE_SIZE_PROFILE
   - MAI_REQUEST_DEADLINE
+  - MAI_AUTO_ASPECT_RATIO
+  - MAI_WEB_GROUNDING
 config_schema:
   MAI_FOUNDRY_API_KEY:
     type: secret
@@ -34,5 +36,11 @@ config_schema:
     type: string
     required: false
   MAI_REQUEST_DEADLINE:
+    type: string
+    required: false
+  MAI_AUTO_ASPECT_RATIO:
+    type: string
+    required: false
+  MAI_WEB_GROUNDING:
     type: string
     required: false
