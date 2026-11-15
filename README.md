@@ -23,13 +23,13 @@ Use the resource root as the endpoint; the plugin appends `/mai/v1` itself. The 
 
 Two paths install the same plugin. Prefer the catalog install; fall back to the Git install when you want the moving branch.
 
-**Catalog install (recommended).** Once this plugin is listed in the Hermes plugin catalog:
+**Catalog install (recommended).** The entry is submitted to the Hermes plugin catalog as `azure-mai-image`; once it is merged there:
 
 ```bash
-hermes plugins install mai-image
+hermes plugins install azure-mai-image
 ```
 
-The catalog entry pins an exact 40-character commit SHA that has been validated and reviewed for the catalog. Installs clone the repository and check out precisely that commit, so a catalog install is reproducible and does not move until you run `hermes plugins update mai-image` (which adopts a newly reviewed pin). Use this path for a stable, vetted plugin.
+The catalog entry (`catalog/mai-image.yaml`) pins an exact 40-character commit SHA that has been validated and reviewed for the catalog. Installs clone the repository, check out precisely that commit, and install from the `src/hermes_mai_image` subdirectory, so a catalog install is reproducible and does not move until you run `hermes plugins update azure-mai-image` (which adopts a newly reviewed pin). Use this path for a stable, vetted plugin.
 
 **Git install (tracks the branch).** To run the current development code instead of a pinned release:
 
@@ -261,7 +261,7 @@ This section is the plugin's [catalog rule 13](https://github.com/NousResearch/h
 - **No telemetry.** The plugin reports no usage, analytics, or diagnostics anywhere.
 - **No shell commands.** It never runs a subprocess or shell command.
 - **No background processes.** It makes synchronous HTTP requests and starts no daemons, timers, or watchers.
-- **No self-updates.** The plugin does not fetch or replace its own files. Catalog updates arrive only through a reviewed SHA-bump in the catalog plus `hermes plugins update mai-image`.
+- **No self-updates.** The plugin does not fetch or replace its own files. Catalog updates arrive only through a reviewed SHA-bump in the catalog plus `hermes plugins update azure-mai-image`.
 - **No extra dependencies.** The only runtime dependency is `requests` (plus Hermes itself).
 
 ## Compatibility
