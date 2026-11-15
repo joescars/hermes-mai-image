@@ -309,8 +309,13 @@ def _download_remote_image(url: str, destination: Path) -> Path:
         raise ValueError("Remote image URL resolves to a private, internal or blocked address")
 
     total = 0
-    with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT) as response:
-        if response.is_redirect or response.is_permanent_redirect:
+    with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT, allow_redirects=False) as response:
+        if (
+            response.is_redirect
+            or response.is_permanent_redirect
+            or response.history
+            or 300 <= response.status_code < 400
+        ):
             raise ValueError("Remote image may not redirect")
         if response.status_code >= 400:
             raise ValueError(f"Image download failed with HTTP {response.status_code}")
