@@ -285,15 +285,14 @@ def test_remote_edit_uses_safe_bounded_download(monkeypatch):
     provider = load_provider(monkeypatch)
     calls = []
 
-    def safe_download(url, destination):
-        calls.append((url, destination))
-        destination.write_bytes(b"\x89PNG\r\n\x1a\nremote image")
-        return destination
+    def safe_download(url):
+        calls.append(url)
+        return b"\x89PNG\r\n\x1a\nremote image"
 
     monkeypatch.setattr(provider, "_download_remote_image", safe_download)
     name, data, content_type = provider._load_source("https://images.example/source.png")
 
-    assert calls[0][0] == "https://images.example/source.png"
+    assert calls[0] == "https://images.example/source.png"
     assert name == "source.png"
     assert data == b"\x89PNG\r\n\x1a\nremote image"
     assert content_type == "image/png"
@@ -418,7 +417,7 @@ def test_remote_download_blocks_unsafe_address(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", fake_get)
     with pytest.raises(ValueError, match="private, internal or blocked"):
-        provider._download_remote_image("http://169.254.169.254/latest/meta-data", tmp_path / "x")
+        provider._download_remote_image("http://169.254.169.254/latest/meta-data")
     assert fetched == []
 
 
@@ -454,7 +453,7 @@ def test_remote_download_rejects_redirect(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", fake_get)
     with pytest.raises(ValueError, match="may not redirect"):
-        provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+        provider._download_remote_image("https://images.example/r.png")
     # Only the original URL was requested; the Location was never fetched.
     assert calls == ["https://images.example/r.png"]
 
@@ -485,7 +484,7 @@ def test_remote_download_disables_redirect_following(monkeypatch, tmp_path):
         return Response()
 
     monkeypatch.setattr(provider.requests, "get", fake_get)
-    provider._download_remote_image("https://images.example/a.png", tmp_path / "a")
+    provider._download_remote_image("https://images.example/a.png")
     assert captured.get("allow_redirects") is False
 
 
@@ -515,7 +514,7 @@ def test_remote_download_rejects_redirect_history_and_3xx(monkeypatch, tmp_path)
     for status, history in ((200, [object()]), (302, [])):
         monkeypatch.setattr(provider.requests, "get", lambda *a, _r=make(status, history), **k: _r)
         with pytest.raises(ValueError, match="may not redirect"):
-            provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+            provider._download_remote_image("https://images.example/r.png")
 
 
 def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
@@ -527,7 +526,7 @@ def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
         provider.requests, "get", lambda *a, **k: fetched.append(a) or (_ for _ in ()).throw(AssertionError)
     )
     with pytest.raises(ValueError, match="private, internal or blocked"):
-        provider._download_remote_image("http://8.8.8.8/x.png", tmp_path / "h")
+        provider._download_remote_image("http://8.8.8.8/x.png")
     assert fetched == []
 
 
@@ -543,6 +542,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
         history = []
 
         def iter_content(self, chunk_size):
+            yield b"\x89PNG\r\n\x1a\n" + b"x" * 16
             for _ in range(6):
                 yield b"x" * (10 * 1024 * 1024)
 
@@ -554,7 +554,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
     with pytest.raises(ValueError, match="byte limit"):
-        provider._download_remote_image("https://images.example/big.png", tmp_path / "big")
+        provider._download_remote_image("https://images.example/big.png")
 
 
 def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
@@ -579,7 +579,7 @@ def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
     with pytest.raises(ValueError, match="not a supported image"):
-        provider._download_remote_image("https://images.example/page.html", tmp_path / "p")
+        provider._download_remote_image("https://images.example/page.html")
 
 
 def _load_manifest():
@@ -866,3 +866,50 @@ def test_list_models_skips_discovery_without_credentials(monkeypatch):
     provider.MAIImageProvider(api_key="k", endpoint="").list_models()
     provider.MAIImageProvider(api_key="", endpoint="https://x.services.ai.azure.com").list_models()
     assert calls == []
+
+
+def test_local_source_over_cap_rejected_by_stat_without_read(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    source = tmp_path / "big.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    monkeypatch.setattr(provider, "MAX_SOURCE_IMAGE_BYTES", 16)
+
+    def no_read(self):
+        raise AssertionError("oversized file must not be read")
+
+    monkeypatch.setattr(provider.Path, "read_bytes", no_read)
+    with pytest.raises(ValueError, match="byte limit"):
+        provider._load_source(str(source))
+
+
+def test_remote_download_returns_bytes_without_tempfile(monkeypatch):
+    import tempfile
+
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+    body = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+    class Response:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+        history = []
+
+        def iter_content(self, chunk_size):
+            yield body[:4]  # first chunk shorter than the 16-byte magic window
+            yield body[4:]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def no_tempfile(*a, **k):
+        raise AssertionError("remote download must stay in memory")
+
+    monkeypatch.setattr(provider.requests, "get", lambda *a, **k: Response())
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", no_tempfile)
+    assert provider._download_remote_image("https://images.example/a.png") == body
+    name, data, content_type = provider._load_source("https://images.example/a.png")
+    assert (name, data, content_type) == ("a.png", body, "image/png")
