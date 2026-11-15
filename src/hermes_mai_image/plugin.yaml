@@ -12,10 +12,19 @@ capabilities:
 requires_env:
   - MAI_FOUNDRY_API_KEY
   - MAI_FOUNDRY_ENDPOINT
+optional_env:
+  - MAI_IMAGE_MODEL
+  - MAI_FOUNDRY_MODELS_PATH
 config_schema:
   MAI_FOUNDRY_API_KEY:
     type: secret
     required: true
   MAI_FOUNDRY_ENDPOINT:
-    type: secret
+    type: string
     required: true
+  MAI_IMAGE_MODEL:
+    type: string
+    required: false
+  MAI_FOUNDRY_MODELS_PATH:
+    type: string
+    required: false
