@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -146,18 +147,54 @@ def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
     return str(explicit or override or _setting(MODEL_ENV, "model") or _configured_model() or DEFAULT_MODEL)
 
 
+_MAX_ERROR_DETAIL = 500
+
+
 def _http_error_message(response: Any, model: str) -> str:
     status = getattr(response, "status_code", None)
+    code = None
+    detail = None
     try:
         body = response.json()
-        detail = body.get("error", {}).get("message") if isinstance(body, dict) else None
+        err = body.get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            code = err.get("code")
+            detail = err.get("message")
+        elif isinstance(err, str):
+            detail = err
     except Exception:
-        detail = None
-    detail = str(detail or getattr(response, "text", "") or "request rejected").strip()
-    if status in (400, 404):
+        pass
+    if not detail:
+        # Non-JSON body (e.g. an HTML error page): strip markup and collapse whitespace.
+        raw = str(getattr(response, "text", "") or "")
+        detail = " ".join(re.sub(r"<[^>]*>", " ", raw).split())
+    detail = str(detail or "no details returned").strip()
+    if code:
+        detail = f"{code}: {detail}"
+    if len(detail) > _MAX_ERROR_DETAIL:
+        detail = detail[:_MAX_ERROR_DETAIL] + "..."
+    if status == 404:
         return (
-            f"MAI deployment '{model}' was not found or is not available on this Foundry resource "
-            f"({status}). Use the exact deployment name from Microsoft Foundry. Details: {detail}"
+            f"MAI deployment '{model}' or endpoint was not found ({status}). Use the exact deployment "
+            f"name from Microsoft Foundry and check that {ENDPOINT_ENV} is the resource root. Details: {detail}"
+        )
+    if status == 400:
+        return (
+            f"Request rejected by MAI ({status}): the prompt, image or parameters were not accepted "
+            "(this can include content-safety rejections). Check that images are at least 768 pixels on "
+            "each side and within the pixel limits, and are JPEG or PNG. "
+            f"Details: {detail}"
+        )
+    if status in (401, 403):
+        return (
+            f"MAI authentication failed ({status}). Check that {API_KEY_ENV} is valid for this Foundry "
+            f"resource and that {ENDPOINT_ENV} points to the same resource. Details: {detail}"
+        )
+    if status == 429:
+        return (
+            f"MAI rate limit exceeded ({status}) after retries. Your quota tier limits requests per minute "
+            "(tier-1 MAI-Image-2.5 is 2 RPM); wait and retry or request a higher quota tier. "
+            f"Details: {detail}"
         )
     return f"MAI request failed ({status or 'unknown status'}): {detail}"
 
@@ -226,16 +263,23 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     return models
 
 
+class UnsupportedImageFormat(ValueError):
+    """Source is a real image in a format MAI does not accept (not JPEG/PNG)."""
+
+
 def _validate_image_bytes(data: bytes, content_type: str) -> str:
-    """Reject non-images and return the authoritative MIME type from magic bytes."""
+    """Reject non-images and return the authoritative MIME type from magic bytes.
+
+    MAI edits accept only JPEG and PNG sources; GIF/WebP are rejected before upload.
+    """
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if data.startswith(b"\xff\xd8\xff"):
         return "image/jpeg"
     if data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
+        raise UnsupportedImageFormat("MAI accepts JPEG or PNG source images (received GIF)")
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        return "image/webp"
+        raise UnsupportedImageFormat("MAI accepts JPEG or PNG source images (received WebP)")
     raise ValueError(f"Source is not a supported image (received {content_type or 'unknown type'})")
 
 
@@ -328,8 +372,13 @@ def _download_remote_image(url: str, destination: Path) -> Path:
         raise ValueError("Remote image URL resolves to a private, internal or blocked address")
 
     total = 0
-    with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT) as response:
-        if response.is_redirect or response.is_permanent_redirect:
+    with requests.get(url, stream=True, timeout=REMOTE_TIMEOUT, allow_redirects=False) as response:
+        if (
+            response.is_redirect
+            or response.is_permanent_redirect
+            or response.history
+            or 300 <= response.status_code < 400
+        ):
             raise ValueError("Remote image may not redirect")
         if response.status_code >= 400:
             raise ValueError(f"Image download failed with HTTP {response.status_code}")
@@ -506,6 +555,8 @@ class MAIImageProvider(ImageGenProvider):
             if result.get("success"):
                 result["modality"] = modality
             return result
+        except UnsupportedImageFormat as exc:
+            return _error(self.name, prompt, aspect, str(exc), "invalid_input", model)
         except requests.RequestException as exc:
             logger.debug("MAI request failed", exc_info=True)
             response = getattr(exc, "response", None)

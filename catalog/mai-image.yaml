@@ -26,6 +26,7 @@ known_issues:
   - "The endpoint must be the Foundry *resource root* (for example https://your-resource.services.ai.azure.com); the provider appends /mai/v1 itself. A URL that already ends in /mai/v1 is not supported."
   - "Model discovery uses the resource's /models route, which not every Foundry resource exposes; when it is absent or empty the built-in MAI fallback catalog is used. Override the discovery path with MAI_FOUNDRY_MODELS_PATH."
   - "Editing accepts exactly one source image (local path or http(s) URL); requests with additional reference images are rejected."
+  - "Source images must be JPEG or PNG; GIF and WebP sources are rejected before upload with error_type invalid_input (no conversion is performed)."
 capabilities:
   provides_tools: []
   provides_hooks: []

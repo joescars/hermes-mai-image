@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Honor Hermes secret scope for `MAI_FOUNDRY_API_KEY` (no env fallback inside Hermes); endpoint is a non-secret setting resolvable from `image_gen.azure-mai.*` config or env, and model/models-path are declared optional (#25).
+- HTTP error messages are now accurate per status: 400 reports a rejected request (with the service
+  `error.code`/`message` and size/format limits) instead of a missing deployment, 404 covers deployment/endpoint,
+  401/403 give authentication guidance, 429 mentions quota tiers, and detail is truncated to ~500 characters (#18).
+- GIF and WebP source images are now rejected before upload with `invalid_input` (MAI accepts only
+  JPEG or PNG); README and catalog known issues list the supported formats.
+- Security: remote source-image downloads no longer follow redirects (`allow_redirects=False`; 3xx and redirect history are rejected), closing an SSRF bypass (#19).
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
 - Provider robustness: HTTP requests to the Foundry MAI endpoints now use retry with backoff, and

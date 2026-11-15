@@ -238,6 +238,36 @@ def test_source_validation_rejects_non_image(monkeypatch, tmp_path):
         provider._load_source(str(source))
 
 
+@pytest.mark.parametrize(
+    "name,data",
+    [
+        ("anim.gif", b"GIF89a" + b"\x00" * 10),
+        ("old.gif", b"GIF87a" + b"\x00" * 10),
+        ("pic.webp", b"RIFF\x00\x00\x00\x00WEBPVP8 "),
+    ],
+)
+def test_edit_rejects_gif_and_webp_without_posting(monkeypatch, tmp_path, name, data):
+    provider = load_provider(monkeypatch)
+    source = tmp_path / name
+    source.write_bytes(data)
+    posted = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: posted.append(1))
+
+    result = provider.MAIImageProvider(
+        api_key="key", endpoint="https://example.services.ai.azure.com", model="deployment"
+    ).generate("edit", "square", image_url=str(source))
+
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_input"
+    assert "JPEG or PNG" in result["error"]
+    assert posted == []
+
+
+def test_source_validation_accepts_jpeg(monkeypatch):
+    provider = load_provider(monkeypatch)
+    assert provider._validate_image_bytes(b"\xff\xd8\xff\xe0data", "") == "image/jpeg"
+
+
 def test_generation_rejects_multiple_reference_images(monkeypatch, tmp_path):
     provider = load_provider(monkeypatch)
     first = tmp_path / "first.png"
@@ -359,6 +389,65 @@ def test_remote_download_rejects_redirect(monkeypatch, tmp_path):
     assert calls == ["https://images.example/r.png"]
 
 
+def test_remote_download_disables_redirect_following(monkeypatch, tmp_path):
+    """requests must be told not to follow redirects; is_redirect alone never fires otherwise."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+    captured = {}
+
+    class Response:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+        history = []
+
+        def iter_content(self, chunk_size):
+            yield b"\x89PNG\r\n\x1a\n" + b"0" * 16
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_get(url, *args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "get", fake_get)
+    provider._download_remote_image("https://images.example/a.png", tmp_path / "a")
+    assert captured.get("allow_redirects") is False
+
+
+def test_remote_download_rejects_redirect_history_and_3xx(monkeypatch, tmp_path):
+    """A response that was reached via redirects, or is itself a 3xx, is refused."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+
+    def make(status, history):
+        class Response:
+            status_code = status
+            is_redirect = False
+            is_permanent_redirect = False
+
+            def iter_content(self, chunk_size):
+                raise AssertionError("must not be streamed")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        Response.history = history
+        return Response()
+
+    for status, history in ((200, [object()]), (302, [])):
+        monkeypatch.setattr(provider.requests, "get", lambda *a, _r=make(status, history), **k: _r)
+        with pytest.raises(ValueError, match="may not redirect"):
+            provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+
+
 def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
     """Plain HTTP is refused even for a public address (HTTPS-only policy)."""
     provider = load_provider(monkeypatch)
@@ -381,6 +470,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             for _ in range(6):
@@ -406,6 +496,7 @@ def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             yield b"<html>not an image</html>"
@@ -527,3 +618,59 @@ def test_ssrf_guard_fails_closed_when_hermes_policy_raises(monkeypatch):
 
     monkeypatch.setattr(provider, "is_safe_url", boom)
     assert provider._source_url_is_safe("https://images.example/a.png") is False
+
+
+def _fake_response(status, body=None, text=""):
+    class Response:
+        status_code = status
+        headers = {"api-key": "SECRET-KEY"}
+
+        def __init__(self):
+            self.text = text
+
+        def json(self):
+            if body is None:
+                raise ValueError("not json")
+            return body
+
+    return Response()
+
+
+def test_http_400_is_request_rejected_not_deployment(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(
+        _fake_response(400, {"error": {"code": "invalid_size", "message": "bad width"}}), "dep"
+    )
+    assert "equest rejected by MAI" in msg
+    assert "invalid_size" in msg and "bad width" in msg
+    assert "768" in msg and "PNG" in msg
+    assert "not found" not in msg
+
+
+def test_http_404_mentions_deployment_and_endpoint(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(404, {"error": {"message": "x"}}), "my-dep")
+    assert "my-dep" in msg and "exact deployment name" in msg and "endpoint" in msg
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_http_auth_errors_do_not_leak_key(monkeypatch, status):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(status, {"error": {"message": "denied"}}), "dep")
+    assert "authentication" in msg.lower() and "MAI_FOUNDRY_API_KEY" in msg
+    assert "SECRET-KEY" not in msg
+
+
+def test_http_429_mentions_quota_tiers(monkeypatch):
+    provider = load_provider(monkeypatch)
+    msg = provider._http_error_message(_fake_response(429, {"error": {"message": "slow"}}), "dep")
+    assert "rate limit" in msg.lower() and "tier" in msg.lower()
+
+
+def test_html_body_is_truncated(monkeypatch):
+    provider = load_provider(monkeypatch)
+    html = "<html>" + "x" * 5000 + "</html>"
+    msg = provider._http_error_message(_fake_response(400, None, html), "dep")
+    assert "equest rejected by MAI" in msg
+    assert len(msg) < 1200
+    assert "<html>" not in msg
