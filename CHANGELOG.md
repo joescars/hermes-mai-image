@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Image edits accept up to five reference images (repeated multipart `image` fields, in order), with
+  per-source checks, a total upload cap, and rejection of more than five before any request (#21).
 - Model picker lists the configured deployment first (de-duplicated, bare id) and labels fallback
   entries as model names that must match your deployment name; README documents best-effort discovery and
   `az` deployment listing. (#27)

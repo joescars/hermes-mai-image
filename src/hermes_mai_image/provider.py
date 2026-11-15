@@ -64,6 +64,8 @@ except ImportError:  # pragma: no cover - only for standalone import outside Her
     get_secret = None
 
 MAX_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
+MAX_REFERENCE_IMAGES = 5  # MAI edits accept up to five repeated `image` fields
+MAX_TOTAL_UPLOAD_BYTES = MAX_REFERENCE_IMAGES * MAX_SOURCE_IMAGE_BYTES
 REMOTE_TIMEOUT = (5, 15)
 MAX_REQUEST_ATTEMPTS = 3
 # 429 always; 502/503 only. 500/504 are never retried: a paid generation may have run.
@@ -628,7 +630,7 @@ class MAIImageProvider(ImageGenProvider):
         }
 
     def capabilities(self) -> Dict[str, Any]:
-        return {"modalities": ["text", "image"], "max_reference_images": 1}
+        return {"modalities": ["text", "image"], "max_reference_images": MAX_REFERENCE_IMAGES}
 
     def generate(
         self,
@@ -653,19 +655,27 @@ class MAIImageProvider(ImageGenProvider):
 
         sources = ([image_url] if image_url else []) + list(reference_image_urls or [])
         try:
-            if len(sources) > 1:
+            if len(sources) > MAX_REFERENCE_IMAGES:
                 return _error(
                     self.name, prompt, aspect,
-                    "Microsoft Foundry MAI image editing supports at most one "
-                    "source image. Reduce reference images to exactly one.",
+                    f"Microsoft Foundry MAI image editing supports at most {MAX_REFERENCE_IMAGES} "
+                    f"source images (received {len(sources)}). Reduce the reference images.",
                     "too_many_references", model)
             if sources:
-                name, data, content_type = _load_source(sources[0])
+                files = []
+                total_bytes = 0
+                for source in sources:
+                    name, data, content_type = _load_source(source)
+                    total_bytes += len(data)
+                    if total_bytes > MAX_TOTAL_UPLOAD_BYTES:
+                        raise ValueError(
+                            f"Total size of source images exceeds {MAX_TOTAL_UPLOAD_BYTES} byte limit")
+                    files.append(("image", (name, data, content_type)))
                 response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/edits",
                     headers={"api-key": api_key},
                     data={"model": model, "prompt": prompt},
-                    files={"image": (name, data, content_type)},
+                    files=files,
                     timeout=REQUEST_TIMEOUT,
                 )
                 modality = "image"
