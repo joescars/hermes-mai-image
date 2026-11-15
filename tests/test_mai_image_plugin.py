@@ -440,6 +440,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             for _ in range(6):
@@ -465,6 +466,7 @@ def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             yield b"<html>not an image</html>"
