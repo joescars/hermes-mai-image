@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Security: remote source-image downloads no longer follow redirects (`allow_redirects=False`; 3xx and redirect history are rejected), closing an SSRF bypass (#19).
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
 - Provider robustness: HTTP requests to the Foundry MAI endpoints now use retry with backoff, and

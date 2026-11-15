@@ -359,6 +359,65 @@ def test_remote_download_rejects_redirect(monkeypatch, tmp_path):
     assert calls == ["https://images.example/r.png"]
 
 
+def test_remote_download_disables_redirect_following(monkeypatch, tmp_path):
+    """requests must be told not to follow redirects; is_redirect alone never fires otherwise."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+    captured = {}
+
+    class Response:
+        status_code = 200
+        is_redirect = False
+        is_permanent_redirect = False
+        history = []
+
+        def iter_content(self, chunk_size):
+            yield b"\x89PNG\r\n\x1a\n" + b"0" * 16
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_get(url, *args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "get", fake_get)
+    provider._download_remote_image("https://images.example/a.png", tmp_path / "a")
+    assert captured.get("allow_redirects") is False
+
+
+def test_remote_download_rejects_redirect_history_and_3xx(monkeypatch, tmp_path):
+    """A response that was reached via redirects, or is itself a 3xx, is refused."""
+    provider = load_provider(monkeypatch)
+    monkeypatch.setattr(provider, "_source_url_is_safe", lambda url: True)
+
+    def make(status, history):
+        class Response:
+            status_code = status
+            is_redirect = False
+            is_permanent_redirect = False
+
+            def iter_content(self, chunk_size):
+                raise AssertionError("must not be streamed")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        Response.history = history
+        return Response()
+
+    for status, history in ((200, [object()]), (302, [])):
+        monkeypatch.setattr(provider.requests, "get", lambda *a, _r=make(status, history), **k: _r)
+        with pytest.raises(ValueError, match="may not redirect"):
+            provider._download_remote_image("https://images.example/r.png", tmp_path / "r")
+
+
 def test_remote_download_rejects_http_scheme(monkeypatch, tmp_path):
     """Plain HTTP is refused even for a public address (HTTPS-only policy)."""
     provider = load_provider(monkeypatch)
@@ -381,6 +440,7 @@ def test_remote_download_enforces_byte_cap(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             for _ in range(6):
@@ -406,6 +466,7 @@ def test_remote_download_rejects_non_image_body(monkeypatch, tmp_path):
         status_code = 200
         is_redirect = False
         is_permanent_redirect = False
+        history = []
 
         def iter_content(self, chunk_size):
             yield b"<html>not an image</html>"
