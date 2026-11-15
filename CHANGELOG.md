@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Source images stream into memory (no temp file), local files are size-checked via `stat` before reading, `MAX_REMOTE_IMAGE_BYTES` is renamed `MAX_SOURCE_IMAGE_BYTES`, and the contradictory `agent.file_safety` comment is fixed.
+
 ### Added
 
 - Model picker lists the configured deployment first (de-duplicated, bare id) and labels fallback
   entries as model names that must match your deployment name; README documents best-effort discovery and
   `az` deployment listing. (#27)
+- Endpoint normalization and validation: pasted `/mai/v1`, `/models`, `/openai/v1` and project URL
+  suffixes resolve to the resource root, bare hosts get `https://`, non-https endpoints fail with
+  `invalid_config` without a request, and model discovery is skipped without credentials.
 - Credential resolution through the Hermes secret scope, so provider settings are read from the
   active profile's secret store instead of ambient environment lookup.
 - An in-plugin, SSRF-safe image downloader that validates reference image URLs before fetching
@@ -20,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CI hardening: ruff lint, Python 3.13/3.14 matrix, SHA-pinned actions, Dependabot, wheel `plugin.yaml` check, a tag-triggered PyPI Trusted Publishing release workflow, and SPDX license metadata (#29).
 - Image sizes are now model-aware: MAI-Image-2.5 models use presets within the 1,048,576-pixel limit
   (landscape `1248x832`, portrait `832x1248`); 2.6 deployments (detected from the name, or via
   `MAI_IMAGE_SIZE_PROFILE` / `image_gen.azure-mai.size_profile` = `2.5`/`2.6`) use larger presets. (#17)
