@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -127,18 +128,54 @@ def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
     return str(explicit or override or _setting(MODEL_ENV) or _configured_model() or DEFAULT_MODEL)
 
 
+_MAX_ERROR_DETAIL = 500
+
+
 def _http_error_message(response: Any, model: str) -> str:
     status = getattr(response, "status_code", None)
+    code = None
+    detail = None
     try:
         body = response.json()
-        detail = body.get("error", {}).get("message") if isinstance(body, dict) else None
+        err = body.get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            code = err.get("code")
+            detail = err.get("message")
+        elif isinstance(err, str):
+            detail = err
     except Exception:
-        detail = None
-    detail = str(detail or getattr(response, "text", "") or "request rejected").strip()
-    if status in (400, 404):
+        pass
+    if not detail:
+        # Non-JSON body (e.g. an HTML error page): strip markup and collapse whitespace.
+        raw = str(getattr(response, "text", "") or "")
+        detail = " ".join(re.sub(r"<[^>]*>", " ", raw).split())
+    detail = str(detail or "no details returned").strip()
+    if code:
+        detail = f"{code}: {detail}"
+    if len(detail) > _MAX_ERROR_DETAIL:
+        detail = detail[:_MAX_ERROR_DETAIL] + "..."
+    if status == 404:
         return (
-            f"MAI deployment '{model}' was not found or is not available on this Foundry resource "
-            f"({status}). Use the exact deployment name from Microsoft Foundry. Details: {detail}"
+            f"MAI deployment '{model}' or endpoint was not found ({status}). Use the exact deployment "
+            f"name from Microsoft Foundry and check that {ENDPOINT_ENV} is the resource root. Details: {detail}"
+        )
+    if status == 400:
+        return (
+            f"Request rejected by MAI ({status}): the prompt, image or parameters were not accepted "
+            "(this can include content-safety rejections). Check that images are at least 768 pixels on "
+            "each side and within the pixel limits, and are JPEG or PNG. "
+            f"Details: {detail}"
+        )
+    if status in (401, 403):
+        return (
+            f"MAI authentication failed ({status}). Check that {API_KEY_ENV} is valid for this Foundry "
+            f"resource and that {ENDPOINT_ENV} points to the same resource. Details: {detail}"
+        )
+    if status == 429:
+        return (
+            f"MAI rate limit exceeded ({status}) after retries. Your quota tier limits requests per minute "
+            "(tier-1 MAI-Image-2.5 is 2 RPM); wait and retry or request a higher quota tier. "
+            f"Details: {detail}"
         )
     return f"MAI request failed ({status or 'unknown status'}): {detail}"
 

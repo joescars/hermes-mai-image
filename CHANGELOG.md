@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- HTTP error messages are now accurate per status: 400 reports a rejected request (with the service
+  `error.code`/`message` and size/format limits) instead of a missing deployment, 404 covers deployment/endpoint,
+  401/403 give authentication guidance, 429 mentions quota tiers, and detail is truncated to ~500 characters (#18).
 - Provider robustness: model discovery no longer raises when the resource `/models` endpoint is
   unavailable, falling back to the documented MAI catalog.
 - Provider robustness: HTTP requests to the Foundry MAI endpoints now use retry with backoff, and
