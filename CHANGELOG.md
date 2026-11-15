@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [0.2.1] - 2026-11-15
+
+### Added
+
+- `python_dependencies` in `plugin.yaml` so a catalog (subdirectory) install knows the plugin
+  needs `requests>=2.28,<3`. The packaging path already got it from `pyproject.toml`.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added
@@ -66,6 +73,7 @@ _Nothing yet._
 - README installation, configuration, Web UI, CLI, troubleshooting, and update instructions
   refreshed for the current Hermes plugin discovery flow.
 
-[Unreleased]: https://github.com/joescars/hermes-mai-image/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/joescars/hermes-mai-image/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.2.1
 [0.2.0]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.2.0
 [0.1.2]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.1.2
