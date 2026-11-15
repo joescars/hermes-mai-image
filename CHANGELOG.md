@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Model picker lists the configured deployment first (de-duplicated, bare id) and labels fallback
+  entries as model names that must match your deployment name; README documents best-effort discovery and
+  `az` deployment listing. (#27)
 - Endpoint normalization and validation: pasted `/mai/v1`, `/models`, `/openai/v1` and project URL
   suffixes resolve to the resource root, bare hosts get `https://`, non-https endpoints fail with
   `invalid_config` without a request, and model discovery is skipped without credentials.

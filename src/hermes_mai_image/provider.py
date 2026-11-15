@@ -593,7 +593,25 @@ class MAIImageProvider(ImageGenProvider):
             except Exception as exc:
                 logger.debug("MAI model discovery unavailable: %s", exc)
                 self._models = []
-        return self._models or [{"id": model, "display": model} for model in FALLBACK_MODELS]
+        # The id is always the bare deployment name sent as the API ``model``. Hermes shows
+        # ``display`` in the Web UI and ``strengths`` as a picker column, so labels go there.
+        entries = self._models or [
+            {
+                "id": model,
+                "display": f"{model} (model name \u2014 must match your deployment name)",
+                "strengths": "model name; must match your deployment name",
+            }
+            for model in FALLBACK_MODELS
+        ]
+        configured = self.model_override or _setting(MODEL_ENV, "model") or _configured_model()
+        if not configured:
+            return entries
+        first = {
+            "id": configured,
+            "display": f"{configured} (configured deployment)",
+            "strengths": "your configured deployment",
+        }
+        return [first] + [entry for entry in entries if entry.get("id") != configured]
 
     def default_model(self) -> Optional[str]:
         return _resolve_model(None, self.model_override)
