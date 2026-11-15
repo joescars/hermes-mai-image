@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Model picker lists the configured deployment first (de-duplicated, bare id) and labels fallback
+  entries as model names that must match your deployment name; README documents best-effort discovery and
+  `az` deployment listing. (#27)
 - Credential resolution through the Hermes secret scope, so provider settings are read from the
   active profile's secret store instead of ambient environment lookup.
 - An in-plugin, SSRF-safe image downloader that validates reference image URLs before fetching

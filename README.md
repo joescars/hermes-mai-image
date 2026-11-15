@@ -184,16 +184,14 @@ The edit request uses MAI's `/mai/v1/images/edits` multipart endpoint.
 
 ## Model discovery
 
-The provider discovers the models available on your Foundry resource at runtime by calling the resource's `/models` route:
+**The `model` sent to MAI is your Foundry *deployment name*, not necessarily a base model name.** Picking `MAI-Image-2.6` works only if your deployment is literally named `MAI-Image-2.6`; otherwise MAI returns 404.
 
-```text
-GET {endpoint}/models
-api-key: ***
-```
+Discovery is best-effort and unverified. The provider calls `GET {endpoint}/models` with the `api-key` header and reads a `data` (or `models`) array. Microsoft's MAI documentation lists deployments only through the Azure management plane, and we could not confirm that `/models` returns MAI deployments on a real resource, so in practice you will usually see the fallback list. Discovered entries that do not look like image models are labelled `(unverified: may not be an image model)`.
 
-The response is read for a `data` array (or a `models` array) of entries; each entry's `id`/`name`/`model` becomes the model id and `display_name`/`name` becomes the label. Discovery is best-effort — not every Foundry resource exposes `/models`, and MAI generation itself does not require it.
+What the picker shows:
 
-When discovery is unavailable, returns nothing, or fails, the provider falls back to a built-in MAI catalog:
+1. Your configured deployment (explicit model, `image_gen.azure-mai.model`, `MAI_IMAGE_MODEL`, or `image_gen.model`) is always listed first, labelled `(configured deployment)`, and de-duplicated against the rest.
+2. Discovered entries, if any; otherwise the built-in fallback catalog, labelled `(model name — must match your deployment name)`:
 
 ```text
 MAI-Image-2.6-Flash
@@ -203,13 +201,25 @@ MAI-Image-2.5-Flash
 MAI-Image-2.5
 ```
 
+Labels appear only in the display/description columns; the id saved to config and sent to the API is always the bare name.
+
+**List your real deployment names** with the Azure CLI:
+
+```bash
+az cognitiveservices account deployment list \
+  --name <resource-name> --resource-group <resource-group> \
+  --query "[].name" -o tsv
+```
+
+Set one of those as the model (`MAI_IMAGE_MODEL` or `image_gen.azure-mai.model`) if it differs from the fallback names.
+
 **Overriding the discovery path.** Set `MAI_FOUNDRY_MODELS_PATH` to point discovery at a different route on the same resource. A value without a leading `/` is normalised by adding one:
 
 ```dotenv
 MAI_FOUNDRY_MODELS_PATH=/models
 ```
 
-The model actually sent to MAI is resolved in this order: an explicit per-request model, then `image_gen.azure-mai.model` in `config.yaml`, then `MAI_IMAGE_MODEL` from the environment, then `image_gen.model`, then the `MAI-Image-2.5` default. The discovered list feeds the picker; it does not change which deployment name is sent unless you pick one.
+The model actually sent to MAI is resolved in this order: an explicit per-request model, then `image_gen.azure-mai.model` in `config.yaml`, then `MAI_IMAGE_MODEL` from the environment, then `image_gen.model`, then the `MAI-Image-2.5` default. The picker list does not change which deployment name is sent unless you pick one.
 
 ## API behavior
 

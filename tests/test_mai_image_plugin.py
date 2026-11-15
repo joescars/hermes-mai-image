@@ -806,3 +806,55 @@ def test_request_deadline_resolution(monkeypatch):
     assert provider._request_deadline_seconds() == float(provider.DEFAULT_REQUEST_DEADLINE)
     monkeypatch.setattr(provider, "_plugin_config", lambda: {"request_deadline": "42"})
     assert provider._request_deadline_seconds() == 42.0
+
+
+def _picker_provider(monkeypatch, discovered, configured=None):
+    module = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_MODEL", raising=False)
+    if configured:
+        monkeypatch.setenv("MAI_IMAGE_MODEL", configured)
+    monkeypatch.setattr(module, "_configured_model", lambda: None)
+    monkeypatch.setattr(module, "discover_models", lambda endpoint, key: list(discovered))
+    return module, module.MAIImageProvider(api_key="k", endpoint="https://x.services.ai.azure.com")
+
+
+def test_list_models_puts_configured_deployment_first_with_bare_id(monkeypatch):
+    _, provider = _picker_provider(monkeypatch, [], configured="my-mai-deployment")
+    models = provider.list_models()
+
+    assert models[0]["id"] == "my-mai-deployment"
+    assert "configured" in models[0]["display"].lower()
+    assert [m["id"] for m in models[1:]][:2] == ["MAI-Image-2.6-Flash", "MAI-Image-2.6"]
+
+
+def test_list_models_dedupes_configured_deployment_in_fallback(monkeypatch):
+    _, provider = _picker_provider(monkeypatch, [], configured="MAI-Image-2.6")
+    ids = [m["id"] for m in provider.list_models()]
+
+    assert ids[0] == "MAI-Image-2.6"
+    assert ids.count("MAI-Image-2.6") == 1
+    assert len(ids) == 5
+
+
+def test_list_models_dedupes_configured_deployment_in_discovery(monkeypatch):
+    _, provider = _picker_provider(
+        monkeypatch, [{"id": "dep-a", "display": "dep-a"}, {"id": "dep-b", "display": "dep-b"}], configured="dep-b"
+    )
+    assert [m["id"] for m in provider.list_models()] == ["dep-b", "dep-a"]
+
+
+def test_list_models_labels_fallback_entries_without_mangling_ids(monkeypatch):
+    module, provider = _picker_provider(monkeypatch, [])
+    models = provider.list_models()
+
+    assert [m["id"] for m in models] == list(module.FALLBACK_MODELS)
+    for entry in models:
+        assert "must match your deployment name" in entry["display"]
+        assert entry["display"].startswith(entry["id"])
+        assert "(" not in entry["id"]
+        assert entry["strengths"]
+
+
+def test_list_models_without_configuration_has_no_configured_entry(monkeypatch):
+    _, provider = _picker_provider(monkeypatch, [])
+    assert not any("configured" in m["display"].lower() for m in provider.list_models())
