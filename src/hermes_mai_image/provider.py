@@ -122,8 +122,48 @@ def _setting(name: str, config_key: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+_ENDPOINT_NOTICES: set = set()
+
+
 def _endpoint(endpoint: Optional[str] = None) -> str:
-    return (endpoint or _setting(ENDPOINT_ENV, "endpoint", "")).rstrip("/")
+    """Return the Foundry resource root (``scheme://host[:port]``) for the configured endpoint.
+
+    Common pasted forms are normalized: a missing scheme gets ``https://`` prepended, and
+    ``/mai/v1``, ``/models``, ``/openai[/v1]``, ``/api/projects/<name>``, query strings and
+    trailing slashes are dropped. A non-https scheme is preserved so callers can reject it
+    (see ``_endpoint_problem``). Empty input yields ``""``.
+    """
+    raw = (endpoint or _setting(ENDPOINT_ENV, "endpoint", "")).strip()
+    if not raw:
+        return ""
+    candidate = raw if "://" in raw else f"https://{raw}"
+    try:
+        parts = urlsplit(candidate)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return raw.rstrip("/")
+    if not host:
+        return raw.rstrip("/")
+    if ":" in host:
+        host = f"[{host}]"
+    normalized = f"{parts.scheme.lower()}://{host}{port}"
+    if normalized != raw:
+        # Never log the raw value: it may carry userinfo or query credentials.
+        if normalized not in _ENDPOINT_NOTICES:
+            _ENDPOINT_NOTICES.add(normalized)
+            logger.debug("MAI endpoint normalized to resource root %s", normalized)
+    return normalized
+
+
+def _endpoint_problem(endpoint: str) -> str:
+    """Return a user-facing message if ``endpoint`` (already normalized) is unusable, else ``""``."""
+    if endpoint and not endpoint.startswith("https://"):
+        return (
+            f"{ENDPOINT_ENV} must be an https:// Foundry resource root "
+            "(for example https://your-resource.services.ai.azure.com)"
+        )
+    return ""
 
 
 def _headers(api_key: str) -> Dict[str, str]:
@@ -541,10 +581,12 @@ class MAIImageProvider(ImageGenProvider):
 
     def is_available(self) -> bool:
         api_key, endpoint = self._credentials()
-        return bool(api_key and endpoint)
+        return bool(api_key and endpoint and not _endpoint_problem(endpoint))
 
     def list_models(self) -> List[Dict[str, str]]:
         api_key, endpoint = self._credentials()
+        if self._models is None and (not api_key or not endpoint or _endpoint_problem(endpoint)):
+            return [{"id": model, "display": model} for model in FALLBACK_MODELS]
         if self._models is None:
             try:
                 self._models = discover_models(endpoint, api_key)
@@ -587,6 +629,9 @@ class MAIImageProvider(ImageGenProvider):
             return _error(self.name, prompt, aspect, "Prompt is required", "invalid_input", model)
         if not api_key or not endpoint:
             return _error(self.name, prompt, aspect, f"Set {API_KEY_ENV} and {ENDPOINT_ENV}", "auth_required", model)
+        problem = _endpoint_problem(endpoint)
+        if problem:
+            return _error(self.name, prompt, aspect, problem, "invalid_config", model)
 
         sources = ([image_url] if image_url else []) + list(reference_image_urls or [])
         try:

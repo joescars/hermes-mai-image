@@ -808,6 +808,66 @@ def test_request_deadline_resolution(monkeypatch):
     assert provider._request_deadline_seconds() == 42.0
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://x.services.ai.azure.com",
+        "https://x.services.ai.azure.com/",
+        "https://x.services.ai.azure.com/mai/v1",
+        "https://x.services.ai.azure.com/mai/v1/",
+        "https://x.services.ai.azure.com/models",
+        "https://x.services.ai.azure.com/openai/v1",
+        "https://x.services.ai.azure.com/openai",
+        "https://x.services.ai.azure.com/api/projects/my-proj",
+        "https://x.services.ai.azure.com/api/projects/my-proj/",
+        "https://X.services.ai.azure.com/mai/v1?api-version=1",
+        "x.services.ai.azure.com",
+        "x.services.ai.azure.com/mai/v1",
+    ],
+)
+def test_endpoint_normalizes_to_resource_root(monkeypatch, raw):
+    provider = load_provider(monkeypatch)
+    assert provider._endpoint(raw) == "https://x.services.ai.azure.com"
+
+
+def test_endpoint_keeps_port_and_logs_once(monkeypatch, caplog):
+    provider = load_provider(monkeypatch)
+    with caplog.at_level("DEBUG", logger=provider.logger.name):
+        assert provider._endpoint("https://h.example:8443/mai/v1") == "https://h.example:8443"
+        provider._endpoint("https://h.example:8443/mai/v1")
+        provider._endpoint("https://h.example:8443")
+    assert len([r for r in caplog.records if "normalized" in r.getMessage()]) == 1
+
+
+def test_http_endpoint_rejected_without_request(monkeypatch):
+    provider = load_provider(monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("no HTTP request expected")
+
+    monkeypatch.setattr(provider.requests, "post", boom)
+    monkeypatch.setattr(provider.requests, "get", boom)
+    monkeypatch.setattr(provider, "_post_with_retry", boom)
+    p = provider.MAIImageProvider(api_key="k", endpoint="http://x.services.ai.azure.com")
+    result = p.generate("a cat")
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_config"
+    assert "https" in result["error"]
+    assert not p.is_available()
+    assert p.list_models()
+
+
+def test_list_models_skips_discovery_without_credentials(monkeypatch):
+    provider = load_provider(monkeypatch)
+    calls = []
+    monkeypatch.setattr(provider, "discover_models", lambda *a: calls.append(a) or [])
+    monkeypatch.setattr(provider, "_plugin_config", lambda: {})
+    monkeypatch.delenv("MAI_FOUNDRY_ENDPOINT", raising=False)
+    provider.MAIImageProvider(api_key="k", endpoint="").list_models()
+    provider.MAIImageProvider(api_key="", endpoint="https://x.services.ai.azure.com").list_models()
+    assert calls == []
+
+
 def test_local_source_over_cap_rejected_by_stat_without_read(monkeypatch, tmp_path):
     provider = load_provider(monkeypatch)
     source = tmp_path / "big.png"
