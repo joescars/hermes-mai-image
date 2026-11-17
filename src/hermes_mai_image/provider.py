@@ -124,11 +124,18 @@ def _secret(name: str) -> str:
 
 
 def _setting(name: str, config_key: str, default: str = "") -> str:
-    """Resolve a non-secret setting: ``image_gen.azure-mai.<config_key>`` in config.yaml,
-    then the ``name`` environment variable, then ``default``."""
+    """Resolve a non-secret setting from provider config, plugin settings, or env.
+
+    The plugin settings surface stores values under ``plugins.settings.azure-mai-image``;
+    its values take precedence over the environment but remain behind the established
+    provider-specific ``image_gen.azure-mai`` configuration.
+    """
     scoped = _plugin_config().get(config_key)
     if scoped is not None and str(scoped).strip():
         return str(scoped).strip()
+    plugin_value = _plugin_settings().get(name)
+    if plugin_value is not None and str(plugin_value).strip():
+        return str(plugin_value).strip()
     return (os.environ.get(name) or default).strip()
 
 
@@ -264,16 +271,33 @@ def _plugin_config() -> Dict[str, Any]:
     return scoped if isinstance(scoped, dict) else {}
 
 
+def _plugin_settings() -> Dict[str, Any]:
+    """Read values saved by Hermes' plugin settings surface.
+
+    ``plugin.yaml`` settings are stored under ``plugins.settings.<plugin-id>.settings``;
+    keep this compatibility path alongside the older provider-specific ``image_gen``
+    configuration so settings saved by the Desktop/Web UI take effect immediately.
+    """
+    config = _load_image_gen_config()
+    plugins = config.get("plugins") if isinstance(config, dict) else None
+    settings = plugins.get("settings") if isinstance(plugins, dict) else None
+    entry = settings.get("azure-mai-image") if isinstance(settings, dict) else None
+    values = entry.get("settings") if isinstance(entry, dict) else None
+    return values if isinstance(values, dict) else {}
+
+
 def _configured_model() -> Optional[str]:
     config = _load_image_gen_config()
     section = config.get("image_gen") if isinstance(config, dict) else None
-    if not isinstance(section, dict):
-        return None
-    scoped = section.get("azure-mai")
-    if isinstance(scoped, dict) and str(scoped.get("model") or "").strip():
-        return str(scoped["model"]).strip()
-    model = section.get("model")
-    return str(model).strip() if isinstance(model, str) and model.strip() else None
+    if isinstance(section, dict):
+        scoped = section.get("azure-mai")
+        if isinstance(scoped, dict) and str(scoped.get("model") or "").strip():
+            return str(scoped["model"]).strip()
+        model = section.get("model")
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    plugin_model = _plugin_settings().get(MODEL_ENV)
+    return str(plugin_model).strip() if plugin_model is not None and str(plugin_model).strip() else None
 
 
 def _is_26_family(model: str) -> bool:

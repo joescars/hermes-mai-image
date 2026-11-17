@@ -34,6 +34,8 @@ config_schema:
     required: false
   MAI_IMAGE_MODEL:
     type: string
+    label: Deployment/model
+    description: "Foundry deployment name; used by the provider on the next request."
     required: false
   MAI_FOUNDRY_MODELS_PATH:
     type: string
