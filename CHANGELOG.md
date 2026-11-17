@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [0.3.0] - 2026-11-17
+
+### Added
+
+- Optional Microsoft Entra ID authentication for generation, edits, and model discovery. Set
+  `MAI_FOUNDRY_AUTH=entra` (or `image_gen.azure-mai.auth: entra`) to authenticate with an Entra
+  access token for the `https://cognitiveservices.azure.com/.default` scope instead of an API key;
+  API-key authentication remains the default and an unrecognised value fails safe to it. Requires
+  the new optional `entra` extra (`azure-identity`), and the identity needs the **Cognitive
+  Services User** role on the resource. 401/403 responses in this mode name that role. (#23)
+- `MAI_FOUNDRY_AUTH` is declared in the manifest as an optional (non-secret) setting, and
+  `MAI_FOUNDRY_API_KEY` is no longer required in Entra mode, so `MAI_FOUNDRY_ENDPOINT` is the only
+  required environment variable. The README documents the Entra setup steps, RBAC role, optional
+  install, and the process-environment scope of `AZURE_*` credentials. (#23)
+
+### Changed
+
+- The Entra token provider is rebuilt whenever the Azure credential environment (`AZURE_*`,
+  `IDENTITY_*`, `MSI_*` variables) changes, so credential rotation or an environment switch takes
+  effect on the next request instead of being pinned to the process's first caller; construction is
+  lock-guarded and the credential fingerprint is never logged.
+
 ## [0.2.1] - 2026-11-15
 
 ### Added
@@ -73,7 +95,8 @@ _Nothing yet._
 - README installation, configuration, Web UI, CLI, troubleshooting, and update instructions
   refreshed for the current Hermes plugin discovery flow.
 
-[Unreleased]: https://github.com/joescars/hermes-mai-image/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/joescars/hermes-mai-image/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.3.0
 [0.2.1]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.2.1
 [0.2.0]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.2.0
 [0.1.2]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.1.2
