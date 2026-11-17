@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [0.3.1] - 2026-11-17
+
+### Fixed
+
+- Non-secret values saved in the Hermes Plugins settings panel now take effect in the provider,
+  including the Foundry deployment/model selected for the next request. The existing
+  `image_gen.azure-mai` configuration takes precedence, followed by plugin settings and then
+  environment variables. (#53)
+
 ## [0.3.0] - 2026-11-17
 
 ### Added
@@ -95,7 +104,8 @@ _Nothing yet._
 - README installation, configuration, Web UI, CLI, troubleshooting, and update instructions
   refreshed for the current Hermes plugin discovery flow.
 
-[Unreleased]: https://github.com/joescars/hermes-mai-image/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/joescars/hermes-mai-image/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/joescars/hermes-mai-image/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.3.0
 [0.2.1]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.2.1
 [0.2.0]: https://github.com/joescars/hermes-mai-image/releases/tag/v0.2.0
