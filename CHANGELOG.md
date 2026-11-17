@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- MAI-Image-2.7 support: `MAI-Image-2.7-Flash` and `MAI-Image-2.7` lead the fallback picker
+  catalog; 2.7 deployments (name containing `2.7`/`2-7`, or `MAI_IMAGE_SIZE_PROFILE=2.7`) use
+  presets within the 4,194,304-pixel limit (landscape `2496x1664`, square `2048x2048`, portrait
+  `1664x2496`) and accept the opt-in `auto_aspect_ratio` / `web_grounding` options.
+
+### Fixed
+
+- Plugin settings saved by Hermes are now read from `plugins.entries.azure-mai-image.settings`,
+  where Hermes actually writes them; 0.3.1 read only `plugins.settings…`, so a model chosen in the
+  Plugins settings panel was ignored. The old path is still read as a fallback.
 
 ## [0.3.1] - 2026-11-17
 

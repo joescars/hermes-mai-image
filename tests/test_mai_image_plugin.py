@@ -911,21 +911,21 @@ def _picker_provider(monkeypatch, discovered, configured=None):
 
 
 def test_list_models_puts_configured_deployment_first_with_bare_id(monkeypatch):
-    _, provider = _picker_provider(monkeypatch, [], configured="my-mai-deployment")
+    module, provider = _picker_provider(monkeypatch, [], configured="my-mai-deployment")
     models = provider.list_models()
 
     assert models[0]["id"] == "my-mai-deployment"
     assert "configured" in models[0]["display"].lower()
-    assert [m["id"] for m in models[1:]][:2] == ["MAI-Image-2.6-Flash", "MAI-Image-2.6"]
+    assert [m["id"] for m in models[1:]] == list(module.FALLBACK_MODELS)
 
 
 def test_list_models_dedupes_configured_deployment_in_fallback(monkeypatch):
-    _, provider = _picker_provider(monkeypatch, [], configured="MAI-Image-2.6")
+    module, provider = _picker_provider(monkeypatch, [], configured="MAI-Image-2.6")
     ids = [m["id"] for m in provider.list_models()]
 
     assert ids[0] == "MAI-Image-2.6"
     assert ids.count("MAI-Image-2.6") == 1
-    assert len(ids) == 5
+    assert len(ids) == len(module.FALLBACK_MODELS)
 
 
 def test_list_models_dedupes_configured_deployment_in_discovery(monkeypatch):
@@ -1406,3 +1406,79 @@ def test_entra_extra_declares_azure_identity():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())
     extras = project["project"]["optional-dependencies"]
     assert any(dep.startswith("azure-identity") for dep in extras["entra"])
+
+
+def test_plugin_settings_are_read_from_hermes_plugins_entries(monkeypatch):
+    # Hermes' settings writer (hermes_cli.plugins_state.save_plugin_setting) stores values under
+    # plugins.entries.<plugin-id>.settings.
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_MODEL", raising=False)
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {
+        "plugins": {"entries": {"azure-mai-image": {"settings": {
+            "MAI_IMAGE_MODEL": "entries-deployment"
+        }}}}
+    })
+
+    assert provider._setting(provider.MODEL_ENV, "model") == "entries-deployment"
+    assert provider.MAIImageProvider(model=None).default_model() == "entries-deployment"
+    ids = [m["id"] for m in provider.MAIImageProvider(api_key="", endpoint="").list_models()]
+    assert "MAI-Image-2.7-Flash" in ids
+
+
+def test_plugin_settings_entries_win_over_legacy_settings_path(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_MODEL", raising=False)
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {"plugins": {
+        "entries": {"azure-mai-image": {"settings": {"MAI_IMAGE_MODEL": "new-path"}}},
+        "settings": {"azure-mai-image": {"settings": {"MAI_IMAGE_MODEL": "old-path"}}},
+    }})
+
+    assert provider._setting(provider.MODEL_ENV, "model") == "new-path"
+
+
+def test_list_models_shows_plugin_entries_model_first(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_MODEL", raising=False)
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {
+        "image_gen": {"model": "MAI-Image-2.6-Flash"},
+        "plugins": {"entries": {"azure-mai-image": {"settings": {"MAI_IMAGE_MODEL": "MAI-Image-2.7-Flash"}}}},
+    })
+    monkeypatch.setattr(provider, "discover_models", lambda endpoint, headers: [])
+    models = provider.MAIImageProvider(api_key="k", endpoint="https://x.services.ai.azure.com").list_models()
+
+    assert models[0]["id"] == "MAI-Image-2.7-Flash"
+    assert "configured" in models[0]["display"].lower()
+
+
+def test_fallback_catalog_lists_27_models_first(monkeypatch):
+    provider = load_provider(monkeypatch)
+    assert provider.FALLBACK_MODELS[:2] == ("MAI-Image-2.7-Flash", "MAI-Image-2.7")
+
+
+@pytest.mark.parametrize("model,aspect,expected", [
+    ("MAI-Image-2.7", "square", (2048, 2048)),
+    ("MAI-Image-2.7-Flash", "landscape", (2496, 1664)),
+    ("mai-image-2-7-flash", "portrait", (1664, 2496)),
+])
+def test_27_sizes(monkeypatch, model, aspect, expected):
+    assert _capture_size(monkeypatch, model, aspect) == expected
+
+
+def test_size_profile_27_override(monkeypatch):
+    assert _capture_size(monkeypatch, "prod-deploy", "square", env={"MAI_IMAGE_SIZE_PROFILE": "2.7"}) == (2048, 2048)
+
+
+def test_27_sizes_within_limit(monkeypatch):
+    provider = load_provider(monkeypatch)
+    for w, h in provider.SIZES_2_7.values():
+        assert w >= 768 and h >= 768 and w * h <= 4194304
+
+
+def test_27_options_are_sent(monkeypatch, mai26_env):
+    calls = _capture_post(monkeypatch, mai26_env)
+    monkeypatch.setenv("MAI_AUTO_ASPECT_RATIO", "true")
+    monkeypatch.setenv("MAI_WEB_GROUNDING", "true")
+    _gen(mai26_env, "MAI-Image-2.7-Flash")
+    body = calls["kwargs"]["json"]
+    assert body["auto_aspect_ratio"] is True
+    assert body["web_grounding"] is True

@@ -90,6 +90,8 @@ REQUEST_TIMEOUT = 300
 DISCOVERY_TIMEOUT = 15
 
 FALLBACK_MODELS = (
+    "MAI-Image-2.7-Flash",
+    "MAI-Image-2.7",
     "MAI-Image-2.6-Flash",
     "MAI-Image-2.6",
     "MAI-Image-2.5-Pro",
@@ -110,6 +112,13 @@ SIZES_2_6 = {
     "landscape": (1824, 1216),
     "square": (1536, 1536),
     "portrait": (1216, 1824),
+}
+# MAI-Image-2.7 family: width/height >= 768, width*height <= 4,194,304 (2048x2048; the
+# service's own validation message, as no published table lists 2.7 yet).
+SIZES_2_7 = {
+    "landscape": (2496, 1664),
+    "square": (2048, 2048),
+    "portrait": (1664, 2496),
 }
 SIZES = SIZES_2_5
 
@@ -274,16 +283,20 @@ def _plugin_config() -> Dict[str, Any]:
 def _plugin_settings() -> Dict[str, Any]:
     """Read values saved by Hermes' plugin settings surface.
 
-    ``plugin.yaml`` settings are stored under ``plugins.settings.<plugin-id>.settings``;
-    keep this compatibility path alongside the older provider-specific ``image_gen``
-    configuration so settings saved by the Desktop/Web UI take effect immediately.
+    Hermes stores ``plugin.yaml`` settings under ``plugins.entries.<plugin-id>.settings``
+    (the Desktop/Web UI and ``ctx.set_config`` share that writer). The ``plugins.settings``
+    path read by 0.3.1 is kept as a fallback; keys under ``entries`` win.
     """
     config = _load_image_gen_config()
     plugins = config.get("plugins") if isinstance(config, dict) else None
-    settings = plugins.get("settings") if isinstance(plugins, dict) else None
-    entry = settings.get("azure-mai-image") if isinstance(settings, dict) else None
-    values = entry.get("settings") if isinstance(entry, dict) else None
-    return values if isinstance(values, dict) else {}
+    merged: Dict[str, Any] = {}
+    for section_name in ("settings", "entries"):
+        section = plugins.get(section_name) if isinstance(plugins, dict) else None
+        entry = section.get("azure-mai-image") if isinstance(section, dict) else None
+        values = entry.get("settings") if isinstance(entry, dict) else None
+        if isinstance(values, dict):
+            merged.update(values)
+    return merged
 
 
 def _configured_model() -> Optional[str]:
@@ -300,17 +313,23 @@ def _configured_model() -> Optional[str]:
     return str(plugin_model).strip() if plugin_model is not None and str(plugin_model).strip() else None
 
 
-def _is_26_family(model: str) -> bool:
-    """True for MAI-Image-2.6 deployments: explicit size_profile override, else name detection."""
+def _model_family(model: str) -> str:
+    """``"2.5"``, ``"2.6"`` or ``"2.7"``: explicit size_profile override, else name detection."""
     profile = _setting(SIZE_PROFILE_ENV, "size_profile")
-    if profile in ("2.5", "2.6"):
-        return profile == "2.6"
-    return bool(re.search(r"2[.\-_]6", model or ""))
+    if profile in ("2.5", "2.6", "2.7"):
+        return profile
+    match = re.search(r"2[.\-_]([67])", model or "")
+    return f"2.{match.group(1)}" if match else "2.5"
+
+
+def _is_26_family(model: str) -> bool:
+    """True for deployments that accept the 2.6 options (MAI-Image-2.6 and later)."""
+    return _model_family(model) in ("2.6", "2.7")
 
 
 def _sizes_for(model: str) -> Dict[str, Any]:
-    """Pick the size table: explicit override (config, then env), else detect 2.6 in the name."""
-    return SIZES_2_6 if _is_26_family(model) else SIZES_2_5
+    """Pick the size table: explicit override (config, then env), else detect the family in the name."""
+    return {"2.6": SIZES_2_6, "2.7": SIZES_2_7}.get(_model_family(model), SIZES_2_5)
 
 
 def _enabled_26_options(model: str) -> List[str]:
@@ -324,8 +343,8 @@ def _enabled_26_options(model: str) -> List[str]:
     ]
     if enabled and not _is_26_family(model):
         logger.warning(
-            "Ignoring %s: only supported by MAI-Image-2.6 deployments (model %r is not detected as 2.6; "
-            "set MAI_IMAGE_SIZE_PROFILE=2.6 to override).", ", ".join(enabled), model)
+            "Ignoring %s: only supported by MAI-Image-2.6 and later deployments (model %r is not "
+            "detected as 2.6 or 2.7; set MAI_IMAGE_SIZE_PROFILE to override).", ", ".join(enabled), model)
         return []
     return enabled
 
