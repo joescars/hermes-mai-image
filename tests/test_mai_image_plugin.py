@@ -50,7 +50,7 @@ def test_discovery_parses_models_response(monkeypatch):
             return {"data": [{"id": "deployment-flash", "name": "Flash deployment"}]}
 
     monkeypatch.setattr(provider.requests, "get", lambda *args, **kwargs: Response())
-    models = provider.discover_models("https://example.services.ai.azure.com", "key")
+    models = provider.discover_models("https://example.services.ai.azure.com", provider._headers("key"))
 
     assert models == [{"id": "deployment-flash", "display": "Flash deployment (unverified: may not be an image model)"}]
 
@@ -66,7 +66,7 @@ def test_discovery_non_json_body_returns_empty(monkeypatch):
             raise json.JSONDecodeError("bad", "<html>", 0)
 
     monkeypatch.setattr(provider.requests, "get", lambda *args, **kwargs: Response())
-    assert provider.discover_models("https://example.services.ai.azure.com", "key") == []
+    assert provider.discover_models("https://example.services.ai.azure.com", provider._headers("key")) == []
 
 
 def test_discovery_labels_unrecognised_models_as_unverified(monkeypatch):
@@ -80,7 +80,7 @@ def test_discovery_labels_unrecognised_models_as_unverified(monkeypatch):
             return {"data": [{"id": "chat-gpt", "name": "Chat"}, {"id": "MAI-Image-2.5"}]}
 
     monkeypatch.setattr(provider.requests, "get", lambda *args, **kwargs: Response())
-    models = provider.discover_models("https://example", "key")
+    models = provider.discover_models("https://example", provider._headers("key"))
     assert [m["id"] for m in models] == ["chat-gpt", "MAI-Image-2.5"]
     assert "unverified" in models[0]["display"]
     assert models[1]["display"] == "MAI-Image-2.5"
@@ -93,7 +93,7 @@ def test_discovery_network_error_returns_empty(monkeypatch):
         raise provider.requests.ConnectionError("down")
 
     monkeypatch.setattr(provider.requests, "get", boom)
-    assert provider.discover_models("https://example", "key") == []
+    assert provider.discover_models("https://example", provider._headers("key")) == []
 
 
 def test_default_model_is_in_fallback_catalog(monkeypatch):
@@ -1152,3 +1152,221 @@ def test_26_options_size_profile_override_enables(monkeypatch, mai26_env):
     monkeypatch.setenv("MAI_WEB_GROUNDING", "true")
     _gen(mai26_env, "custom-deployment")
     assert calls["kwargs"]["json"]["web_grounding"] is True
+
+
+# --- Microsoft Entra ID authentication (issue #23) -------------------------
+
+
+def _install_fake_azure_identity(monkeypatch, token="entra-token", error=None, factories=None):
+    """Install a fake ``azure.identity`` whose ``get_bearer_token_provider`` is observable.
+
+    ``factories`` (when given) records every ``(credential, scope)`` factory call; the
+    returned token callable raises ``error`` when supplied, else returns ``token``.
+    """
+
+    def fake_get_bearer_token_provider(credential, scope):
+        if factories is not None:
+            factories.append(scope)
+
+        def _token():
+            if error is not None:
+                raise error
+            return token
+
+        return _token
+
+    identity = ModuleType("azure.identity")
+    identity.DefaultAzureCredential = lambda: object()
+    identity.get_bearer_token_provider = fake_get_bearer_token_provider
+    azure = ModuleType("azure")
+    azure.identity = identity
+    monkeypatch.setitem(sys.modules, "azure", azure)
+    monkeypatch.setitem(sys.modules, "azure.identity", identity)
+
+
+def test_entra_mode_sends_bearer_and_not_api_key(monkeypatch):
+    provider = load_provider(monkeypatch)
+    factories = []
+    _install_fake_azure_identity(monkeypatch, token="entra-token", factories=factories)
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "entra")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    calls = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"png").decode()}]}
+
+    def post(url, **kwargs):
+        calls.update(url=url, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "post", post)
+    result = provider.MAIImageProvider(model="deployment").generate("a blue bird", "landscape")
+
+    assert result["success"] is True
+    headers = calls["kwargs"]["headers"]
+    assert headers["Authorization"] == "Bearer entra-token"
+    assert "api-key" not in headers
+    assert factories == ["https://cognitiveservices.azure.com/.default"]
+
+
+def test_entra_mode_edit_uses_bearer_and_not_api_key(monkeypatch, tmp_path):
+    provider = load_provider(monkeypatch)
+    _install_fake_azure_identity(monkeypatch, token="edit-token")
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "entra")
+    source = tmp_path / "source.png"
+    source.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    calls = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"edited").decode()}]}
+
+    def post(url, **kwargs):
+        calls.update(url=url, kwargs=kwargs)
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "post", post)
+    result = provider.MAIImageProvider(endpoint="https://example.services.ai.azure.com").generate(
+        "make it brighter", image_url=str(source))
+
+    assert result["success"] is True
+    headers = calls["kwargs"]["headers"]
+    assert headers["Authorization"] == "Bearer edit-token"
+    assert "api-key" not in headers
+
+
+def test_entra_mode_without_azure_identity_returns_clear_error(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.setitem(sys.modules, "azure", None)
+    monkeypatch.setitem(sys.modules, "azure.identity", None)
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "entra")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    posted = []
+
+    def post(*args, **kwargs):
+        posted.append(1)
+
+    monkeypatch.setattr(provider.requests, "post", post)
+    result = provider.MAIImageProvider().generate("a blue bird")
+
+    assert result["success"] is False
+    assert "azure-identity" in result["error"]
+    assert 'pip install "hermes-mai-image[entra]"' in result["error"]
+    assert not posted
+
+
+def test_entra_mode_is_available_with_endpoint_and_no_api_key(monkeypatch):
+    provider = load_provider(monkeypatch)
+    _install_fake_azure_identity(monkeypatch)
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "entra")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    monkeypatch.delenv("MAI_FOUNDRY_API_KEY", raising=False)
+    assert provider.MAIImageProvider().is_available() is True
+
+
+def test_entra_mode_without_azure_identity_is_not_available(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.setitem(sys.modules, "azure", None)
+    monkeypatch.setitem(sys.modules, "azure.identity", None)
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "entra")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    assert provider.MAIImageProvider().is_available() is False
+
+
+def test_key_mode_still_requires_api_key_for_availability(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    monkeypatch.delenv("MAI_FOUNDRY_API_KEY", raising=False)
+    assert provider.MAIImageProvider().is_available() is False
+
+
+def test_entra_mode_token_failure_returns_clear_error(monkeypatch):
+    provider = load_provider(monkeypatch)
+    _install_fake_azure_identity(monkeypatch, error=RuntimeError("credential chain failed"))
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "entra")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    posted = []
+    monkeypatch.setattr(provider.requests, "post", lambda *a, **k: posted.append(1))
+
+    result = provider.MAIImageProvider().generate("a blue bird")
+
+    assert result["success"] is False
+    assert result["error_type"] == "auth_required"
+    assert "Cognitive Services User" in result["error"]
+    assert not posted
+
+
+def test_entra_mode_discovery_uses_bearer_and_not_api_key(monkeypatch):
+    provider = load_provider(monkeypatch)
+    _install_fake_azure_identity(monkeypatch, token="disco-token")
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "entra")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    seen = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"id": "MAI-Image-2.5"}]}
+
+    def get(url, **kwargs):
+        seen.update(url=url, headers=kwargs.get("headers"))
+        return Response()
+
+    monkeypatch.setattr(provider.requests, "get", get)
+    models = provider.MAIImageProvider().list_models()
+
+    assert seen["headers"]["Authorization"] == "Bearer disco-token"
+    assert "api-key" not in seen["headers"]
+    assert models[0]["id"] == "MAI-Image-2.5"
+
+
+def test_unknown_auth_mode_falls_back_to_api_key(monkeypatch):
+    provider = load_provider(monkeypatch)
+    _install_fake_azure_identity(monkeypatch)
+    monkeypatch.setenv("MAI_FOUNDRY_AUTH", "_certificate")
+    monkeypatch.setenv("MAI_FOUNDRY_ENDPOINT", "https://example.services.ai.azure.com")
+    assert provider._auth_mode() == "key"
+    assert provider.MAIImageProvider(api_key="key").is_available() is True
+
+
+def test_http_auth_error_in_entra_mode_mentions_rbac_role(monkeypatch):
+    provider = load_provider(monkeypatch)
+
+    class Response:
+        status_code = 401
+        text = "denied"
+
+        def json(self):
+            return {"error": {"message": "denied"}}
+
+    message = provider._http_error_message(Response(), "deployment", entra=True)
+    assert "Cognitive Services User" in message
+    assert provider.API_KEY_ENV not in message
+
+
+def test_manifest_keeps_api_key_optional_for_entra_and_declares_auth_setting():
+    manifest = _load_manifest()
+    assert "MAI_FOUNDRY_AUTH" in manifest["optional_env"]
+    assert manifest["config_schema"]["MAI_FOUNDRY_AUTH"] == {"type": "string", "required": False}
+    assert "MAI_FOUNDRY_API_KEY" not in manifest["requires_env"]
+    assert "MAI_FOUNDRY_API_KEY" in manifest["optional_env"]
+
+
+def test_entra_extra_declares_azure_identity():
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    extras = project["project"]["optional-dependencies"]
+    assert any(dep.startswith("azure-identity") for dep in extras["entra"])

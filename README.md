@@ -8,7 +8,7 @@ Standalone Hermes Agent image-generation backend for Microsoft Foundry MAI image
 
 From the Foundry resource's **Keys and Endpoint** page, collect:
 
-- An API key.
+- An API key — or, if your resource has local (key) authentication disabled, Microsoft Entra ID credentials the plugin can pick up (see [Microsoft Entra ID authentication](#microsoft-entra-id-authentication-no-api-key) below).
 - The resource endpoint, for example:
 
   ```text
@@ -39,6 +39,13 @@ The catalog entry (`catalog/mai-image.yaml`) pins an exact 40-character commit S
 ```
 
 The Git install tracks the branch, so `--upgrade` picks up the newest commits. A catalog install is pinned and validated; a Git install is live and unreviewed. Use the catalog install unless you specifically want unreleased changes.
+
+To use Microsoft Entra ID authentication instead of an API key, install the optional `entra` extra (adds `azure-identity`):
+
+```bash
+/usr/local/lib/hermes-agent/venv/bin/pip install --upgrade \
+  "hermes-mai-image[entra] @ git+https://github.com/joescars/hermes-mai-image.git"
+```
 
 Verify the package is visible either way:
 
@@ -100,9 +107,10 @@ The Web UI uses the provider's setup schema and saves credentials in the active 
 ```text
 MAI_FOUNDRY_API_KEY
 MAI_FOUNDRY_ENDPOINT
+MAI_FOUNDRY_AUTH
 ```
 
-**Credential handling.** The plugin reads `MAI_FOUNDRY_API_KEY` and `MAI_FOUNDRY_ENDPOINT` through Hermes secret scope for the **active profile** — the values are resolved in the context of the profile that is running, so a second profile cannot pick them up accidentally. The values live in the active profile's `.env` under `$HERMES_HOME/profiles/<profile>/.env` (the default profile's `.env` sits at `$HERMES_HOME/.env`). The API key is sent to your Foundry resource in the `api-key` header on each request and is never logged, never written by the plugin anywhere else, and never included in image metadata.
+**Credential handling.** The plugin reads `MAI_FOUNDRY_API_KEY` and `MAI_FOUNDRY_ENDPOINT` through Hermes secret scope for the **active profile** — the values are resolved in the context of the profile that is running, so a second profile cannot pick them up accidentally. The values live in the active profile's `.env` under `$HERMES_HOME/profiles/<profile>/.env` (the default profile's `.env` sits at `$HERMES_HOME/.env`). The API key is sent to your Foundry resource in the `api-key` header on each request and is never logged, never written by the plugin anywhere else, and never included in image metadata. In Entra mode (`MAI_FOUNDRY_AUTH=entra`) no API key is needed or sent; see [Microsoft Entra ID authentication](#microsoft-entra-id-authentication-no-api-key).
 
 Never put API keys in `config.yaml`, chat messages, or Git. Only `MAI_FOUNDRY_API_KEY` is a secret: inside Hermes it is read solely from the active profile's secret scope (a same-named process environment variable is ignored); outside Hermes it falls back to the environment. The endpoint, model and discovery path are non-secret and can instead be set in `config.yaml` under `image_gen.azure-mai` as `endpoint`, `model` and `models_path` (config wins over the `MAI_FOUNDRY_ENDPOINT`, `MAI_IMAGE_MODEL`, `MAI_FOUNDRY_MODELS_PATH` env vars; `MAI_IMAGE_MODEL` and `MAI_FOUNDRY_MODELS_PATH` are optional). `config.yaml` holds only non-secret model selection, not credentials.
 
@@ -174,7 +182,7 @@ The edit request uses MAI's `/mai/v1/images/edits` multipart endpoint.
 
 ## Features
 
-- API-key authentication with the Foundry `api-key` header
+- API-key authentication with the Foundry `api-key` header, or optional Microsoft Entra ID (`Authorization: Bearer`) authentication
 - Live model discovery through the resource `/models` endpoint, with a documented MAI fallback catalog
 - Text-to-image generation through `/mai/v1/images/generations`
 - Image-to-image editing through `/mai/v1/images/edits`
@@ -221,24 +229,67 @@ MAI_FOUNDRY_MODELS_PATH=/models
 
 The model actually sent to MAI is resolved in this order: an explicit per-request model, then `image_gen.azure-mai.model` in `config.yaml`, then `MAI_IMAGE_MODEL` from the environment, then `image_gen.model`, then the `MAI-Image-2.5` default. The picker list does not change which deployment name is sent unless you pick one.
 
+## Microsoft Entra ID authentication (no API key)
+
+Many enterprise Foundry resources disable local (key) authentication. On those, the plugin can authenticate with Microsoft Entra ID instead of an API key.
+
+**1. Install the `entra` extra.** It adds the optional `azure-identity` dependency:
+
+```bash
+/usr/local/lib/hermes-agent/venv/bin/pip install --upgrade \
+  "hermes-mai-image[entra] @ git+https://github.com/joescars/hermes-mai-image.git"
+```
+
+**2. Assign the RBAC role.** Give the identity the plugin will run as the **Cognitive Services User** role on the Foundry resource (resource group or subscription scope works too, but keep it as narrow as possible):
+
+```bash
+az role assignment create \
+  --assignee <object-id-or-principal> \
+  --role "Cognitive Services User" \
+  --scope /subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.CognitiveServices/accounts/<resource-name>
+```
+
+**3. Switch the auth mode.** In the active Hermes profile's `.env`, set the mode and the endpoint. `MAI_FOUNDRY_API_KEY` is **not** required in this mode:
+
+```dotenv
+MAI_FOUNDRY_AUTH=entra
+MAI_FOUNDRY_ENDPOINT=https://your-resource.services.ai.azure.com
+MAI_IMAGE_MODEL=your-deployment-name
+```
+
+`MAI_FOUNDRY_AUTH` may also be set as `image_gen.azure-mai.auth: entra` in `config.yaml` (non-secret; config wins over the environment). Any value other than `entra` keeps the default key authentication, so an unrecognised value fails safe rather than changing behaviour.
+
+**How it works.** The plugin builds a `DefaultAzureCredential` and requests access tokens for the scope `https://cognitiveservices.azure.com/.default`. Tokens are obtained with `get_bearer_token_provider` and cached until near expiry, so Microsoft Entra ID is contacted only when a new token is actually needed, not on every image request. Requests then carry `Authorization: Bearer <token>` instead of the `api-key` header.
+
+`DefaultAzureCredential` resolves credentials in the standard order — environment variables (`AZURE_CLIENT_ID`/`AZURE_TENANT_ID`/`AZURE_CLIENT_SECRET`), managed identity, `az login`, and so on — so it works on a VM, in a container with a managed identity, or on a workstation with the Azure CLI signed in.
+
+**Error handling.** With `MAI_FOUNDRY_AUTH=entra` set but `azure-identity` missing, generation returns a clear `invalid_config` error naming the `pip install "hermes-mai-image[entra]"` command instead of attempting a request. If token acquisition fails (for example the role assignment is missing), the error names the **Cognitive Services User** role to check.
+
 ## API behavior
 
-MAI generation uses:
+MAI generation uses (key mode):
 
 ```text
 POST {endpoint}/mai/v1/images/generations
-api-key: ...
+api-key: ***
 {"model": "<deployment>", "prompt": "...", "width": 1248, "height": 832}
 ```
 
-MAI editing uses multipart form data:
+MAI editing uses multipart form data (key mode):
 
 ```text
 POST {endpoint}/mai/v1/images/edits
-api-key: ...
+api-key: ***
 model=<deployment>
 prompt=<prompt>
 image=<file>
+```
+
+In Entra mode (`MAI_FOUNDRY_AUTH=entra`) the `api-key` header is replaced by an Entra access token on both endpoints:
+
+```text
+POST {endpoint}/mai/v1/images/generations
+Authorization: Bearer <token-from-microsoft-entra>
 ```
 
 The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_image_urls`. Up to five source images (JPEG/PNG) are supported for edits and are sent as repeated multipart `image` fields in the order given (`image_url` first, then `reference_image_urls`); more than five are rejected with a `too_many_references` error before any request is sent. Each source passes the same safety, format and size checks, and the combined upload is capped at 250 MB. Generated images remain in Hermes' `$HERMES_HOME/cache/images/`. Successful results expose the WebUI-facing `file://` URI in `image` and retain the absolute cached path in `host_image` for Hermes media delivery.
@@ -254,7 +305,7 @@ The plugin accepts a local file path or HTTP(S) URL as `image_url`/`reference_im
 
 This section is the plugin's [catalog rule 13](https://github.com/NousResearch/hermes-agent/blob/main/plugin-catalog/README.md) disclosure — what the plugin does that you should know before installing it.
 
-- **Network destination.** Your prompt, the optional source image (for edits), and your `MAI_FOUNDRY_API_KEY` are sent over **https** to **your own Microsoft Azure AI Foundry resource** — the endpoint you configure in `MAI_FOUNDRY_ENDPOINT`. The plugin talks to no other host. The API key travels only in the `api-key` header on requests to that resource.
+- **Network destination.** Your prompt, the optional source image (for edits), and your Foundry credentials are sent over **https** to **your own Microsoft Azure AI Foundry resource** — the endpoint you configure in `MAI_FOUNDRY_ENDPOINT`. The plugin talks to no other host. In the default key mode the API key travels only in the `api-key` header on requests to that resource; in Entra mode a Microsoft Entra access token for the `https://cognitiveservices.azure.com/.default` scope travels only in the `Authorization` header to that same resource (obtained from Microsoft Entra ID and cached until near expiry).
 - **Web grounding (opt-in).** If you enable `web_grounding` (MAI-Image-2.6 only, off by default), the model may derive search queries from your prompt and send them to **Bing Search** as part of the Foundry service. Leave it off if prompts must not leave your Foundry resource for web search.
 - **Billing.** Every generation and edit calls your Foundry deployment and **bills your Azure subscription** for that deployment. There is **no Hermes approval prompt before spending** — the plugin does not gate on cost and does not know MAI pricing. Your Azure quota and rate limits are the only backstop.
 - **Local writes.** Returned images are downloaded and written into the Hermes image cache under `$HERMES_HOME/cache/images/`. Nothing is written outside that cache and the plugin's own working directory.
@@ -262,7 +313,7 @@ This section is the plugin's [catalog rule 13](https://github.com/NousResearch/h
 - **No shell commands.** It never runs a subprocess or shell command.
 - **No background processes.** It makes synchronous HTTP requests and starts no daemons, timers, or watchers.
 - **No self-updates.** The plugin does not fetch or replace its own files. Catalog updates arrive only through a reviewed SHA-bump in the catalog plus `hermes plugins update azure-mai-image`.
-- **No extra dependencies.** The only runtime dependency is `requests` (plus Hermes itself).
+- **No extra required dependencies.** The only required runtime dependency is `requests` (plus Hermes itself). The optional Entra mode adds `azure-identity`, installed only when you choose the `[entra]` extra.
 
 ## Compatibility
 
@@ -283,6 +334,7 @@ Source images are the one place this plugin handles untrusted input. Remote refe
 - **Up to five reference images.** MAI editing takes at most five JPEG/PNG source images. Six or more are rejected with a `too_many_references` error before any request is sent, and the total upload across sources is capped at 250 MB.
 - **Width and height constraints.** Generation uses fixed presets chosen from the resolved aspect ratio and the model family (width and height each ≥ 768; MAI-Image-2.5 family ≤ 1,048,576 pixels, MAI-Image-2.6 family ≤ 2,359,296). 2.5 (default): landscape `1248x832`, square `1024x1024`, portrait `832x1248`. 2.6: landscape `1824x1216`, square `1536x1536`, portrait `1216x1824`. A deployment name containing `2.6` or `2-6` selects the 2.6 sizes; otherwise 2.5 sizes are used. For custom deployment names, set `MAI_IMAGE_SIZE_PROFILE=2.6` (or `2.5`) in the profile `.env`, or `image_gen.azure-mai.size_profile` in `config.yaml`. There is no free-form width/height input.
 - **MAI-Image-2.6 options.** `auto_aspect_ratio` (the model chooses the output aspect ratio) and `web_grounding` (the model may use Bing Search results as context; see Disclosure) are off by default and sent only when enabled, on both generation and edits. Enable with `image_gen.azure-mai.auto_aspect_ratio: true` / `web_grounding: true` in `config.yaml`, or `MAI_AUTO_ASPECT_RATIO=true` / `MAI_WEB_GROUNDING=true` in the profile `.env` (truthy: `1`, `true`, `yes`, `on`). They are only supported by 2.6 deployments (2.5 returns 400): on other deployments the fields are skipped with a logged warning. For custom deployment names, set `size_profile` / `MAI_IMAGE_SIZE_PROFILE` to `2.6`.
+- **Auth tokens.** In Entra mode the plugin obtains access tokens through `azure-identity`'s `DefaultAzureCredential` for the `https://cognitiveservices.azure.com/.default` scope only, sends them only in the `Authorization` header to the configured endpoint, and never logs or persists them; token refresh and caching are handled by `azure-identity`. Key mode continues to send the API key only in the `api-key` header.
 
 ## Development
 
@@ -313,3 +365,4 @@ The other private import originally flagged — `tools.vision_tools._download_im
 ## Microsoft documentation
 
 - [Deploy and use MAI image models in Microsoft Foundry](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-mai-image)
+- [Use Microsoft Entra ID authentication with MAI image models](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/how-to/use-foundry-models-mai-image#use-microsoft-entra-id-authentication)

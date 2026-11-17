@@ -1,7 +1,9 @@
 """Microsoft Foundry MAI image-generation backend for Hermes Agent.
 
 The MAI API is not OpenAI-compatible: it uses ``/mai/v1`` endpoints,
-``api-key`` authentication, JSON generation requests, and multipart edits.
+JSON generation requests, and multipart edits. Authentication is either the
+Foundry ``api-key`` header (default) or Microsoft Entra ID bearer tokens via
+the optional ``azure-identity`` dependency (``MAI_FOUNDRY_AUTH=entra``).
 """
 
 from __future__ import annotations
@@ -80,6 +82,9 @@ MODEL_ENV = "MAI_IMAGE_MODEL"
 API_KEY_ENV = "MAI_FOUNDRY_API_KEY"
 ENDPOINT_ENV = "MAI_FOUNDRY_ENDPOINT"
 DISCOVERY_PATH_ENV = "MAI_FOUNDRY_MODELS_PATH"
+AUTH_ENV = "MAI_FOUNDRY_AUTH"
+# Entra ID (Microsoft Entra) access-token scope for Cognitive Services / Foundry resources.
+ENTRA_SCOPE = "https://cognitiveservices.azure.com/.default"
 REQUEST_TIMEOUT = 300
 DISCOVERY_TIMEOUT = 15
 
@@ -174,6 +179,40 @@ def _headers(api_key: str) -> Dict[str, str]:
     return {"api-key": api_key, "Accept": "application/json"}
 
 
+_entra_token_provider_cache: Optional[Any] = None
+
+
+def _entra_token_provider() -> Optional[Any]:
+    """Return a callable producing (cached) Entra access tokens, or ``None``.
+
+    Requires the optional ``azure-identity`` dependency (the ``entra`` extra). The returned
+    provider caches its token and refreshes it before expiry, so repeated calls only hit
+    Microsoft Entra ID when a new token is actually needed.
+    """
+    global _entra_token_provider_cache
+    if _entra_token_provider_cache is None:
+        try:
+            from azure.identity import (
+                DefaultAzureCredential,
+                get_bearer_token_provider,
+            )
+        except ImportError:
+            return None
+        _entra_token_provider_cache = get_bearer_token_provider(
+            DefaultAzureCredential(), ENTRA_SCOPE
+        )
+    return _entra_token_provider_cache
+
+
+def _auth_mode() -> str:
+    """Resolve the authentication mode: ``entra`` or ``key`` (the default).
+
+    Any value other than ``entra`` (case-insensitive) selects key authentication, so an
+    unknown value fails safe into the documented default rather than breaking setup.
+    """
+    return "entra" if _setting(AUTH_ENV, "auth", "key").lower() == "entra" else "key"
+
+
 def _load_image_gen_config() -> Dict[str, Any]:
     try:
         from hermes_cli.config import load_config
@@ -238,7 +277,7 @@ def _resolve_model(explicit: Optional[str], override: Optional[str]) -> str:
 _MAX_ERROR_DETAIL = 500
 
 
-def _http_error_message(response: Any, model: str) -> str:
+def _http_error_message(response: Any, model: str, entra: bool = False) -> str:
     status = getattr(response, "status_code", None)
     code = None
     detail = None
@@ -274,6 +313,12 @@ def _http_error_message(response: Any, model: str) -> str:
             f"Details: {detail}"
         )
     if status in (401, 403):
+        if entra:
+            return (
+                f"MAI authentication failed ({status}). Verify this identity has the Cognitive "
+                f"Services User role on the Foundry resource and that {ENDPOINT_ENV} points to "
+                f"the same resource. Details: {detail}"
+            )
         return (
             f"MAI authentication failed ({status}). Check that {API_KEY_ENV} is valid for this Foundry "
             f"resource and that {ENDPOINT_ENV} points to the same resource. Details: {detail}"
@@ -298,12 +343,13 @@ def _error(provider: str, prompt: str, aspect: str, message: str, error_type: st
     )
 
 
-def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
+def discover_models(endpoint: str, headers: Dict[str, str]) -> List[Dict[str, str]]:
     """Best-effort discovery from the resource's standard ``/models`` route.
 
     MAI's image-generation endpoint itself does not require discovery. Some
     Foundry resources expose ``/models`` and some do not, so callers must use
-    the fallback catalog when this returns an empty list.
+    the fallback catalog when this returns an empty list. ``headers`` are the
+    fully resolved authentication headers (key or Entra bearer).
     """
     path = _setting(DISCOVERY_PATH_ENV, "models_path", "/models")
     if not path.startswith("/"):
@@ -311,7 +357,7 @@ def discover_models(endpoint: str, api_key: str) -> List[Dict[str, str]]:
     try:
         response = requests.get(
             f"{endpoint.rstrip('/')}{path}",
-            headers=_headers(api_key),
+            headers=headers,
             timeout=DISCOVERY_TIMEOUT,
         )
         response.raise_for_status()
@@ -591,11 +637,47 @@ class MAIImageProvider(ImageGenProvider):
         self.model_override = model
         self._models: Optional[List[Dict[str, str]]] = None
 
-    def _credentials(self) -> tuple[str, str]:
-        return (
-            self.api_key_override if self.api_key_override is not None else _secret(API_KEY_ENV),
-            _endpoint(self.endpoint_override),
-        )
+    def _api_key(self) -> str:
+        return self.api_key_override if self.api_key_override is not None else _secret(API_KEY_ENV)
+
+    def _resolve_auth(self) -> tuple[str, Optional[Dict[str, str]], str, str]:
+        """Resolve ``(endpoint, headers, error, error_type)`` for the configured auth mode.
+
+        ``headers`` is ``None`` when authentication cannot be prepared; then ``error`` and
+        ``error_type`` carry a user-facing message. In Entra mode the bearer token is fetched
+        (and cached by ``azure-identity`` until near expiry) at request time.
+        """
+        endpoint = _endpoint(self.endpoint_override)
+        if not endpoint:
+            if _auth_mode() == "entra":
+                return "", None, f"Set {ENDPOINT_ENV} ({AUTH_ENV}=entra)", "auth_required"
+            return "", None, f"Set {API_KEY_ENV} and {ENDPOINT_ENV}", "auth_required"
+        problem = _endpoint_problem(endpoint)
+        if problem:
+            return endpoint, None, problem, "invalid_config"
+        if _auth_mode() == "entra":
+            token_provider = _entra_token_provider()
+            if token_provider is None:
+                return (
+                    endpoint, None,
+                    f"{AUTH_ENV}=entra requires the azure-identity package, which is not installed. "
+                    'Install it with: pip install "hermes-mai-image[entra]"',
+                    "invalid_config",
+                )
+            try:
+                token = token_provider()
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user below
+                return (
+                    endpoint, None,
+                    f"Entra ID token acquisition failed: {exc}. Verify this identity has the "
+                    "Cognitive Services User role on the Foundry resource.",
+                    "auth_required",
+                )
+            return endpoint, {"Authorization": f"Bearer {token}", "Accept": "application/json"}, "", ""
+        api_key = self._api_key()
+        if not api_key:
+            return endpoint, None, f"Set {API_KEY_ENV} and {ENDPOINT_ENV}", "auth_required"
+        return endpoint, _headers(api_key), "", ""
 
     @property
     def name(self) -> str:
@@ -606,16 +688,21 @@ class MAIImageProvider(ImageGenProvider):
         return self.label
 
     def is_available(self) -> bool:
-        api_key, endpoint = self._credentials()
-        return bool(api_key and endpoint and not _endpoint_problem(endpoint))
+        endpoint = _endpoint(self.endpoint_override)
+        if not endpoint or _endpoint_problem(endpoint):
+            return False
+        if _auth_mode() == "entra":
+            # No token fetch here: availability is a cheap gate; the extra must be installed.
+            return _entra_token_provider() is not None
+        return bool(self._api_key())
 
     def list_models(self) -> List[Dict[str, str]]:
-        api_key, endpoint = self._credentials()
-        if self._models is None and (not api_key or not endpoint or _endpoint_problem(endpoint)):
+        endpoint, headers, _error, _error_type = self._resolve_auth()
+        if self._models is None and (headers is None or not endpoint):
             return [{"id": model, "display": model} for model in FALLBACK_MODELS]
-        if self._models is None:
+        if self._models is None and headers is not None:
             try:
-                self._models = discover_models(endpoint, api_key)
+                self._models = discover_models(endpoint, headers)
             except Exception as exc:
                 logger.debug("MAI model discovery unavailable: %s", exc)
                 self._models = []
@@ -650,6 +737,7 @@ class MAIImageProvider(ImageGenProvider):
             "env_vars": [
                 {"key": API_KEY_ENV, "prompt": "Microsoft Foundry API key", "url": "https://ai.azure.com"},
                 {"key": ENDPOINT_ENV, "prompt": "Microsoft Foundry resource endpoint", "url": "https://ai.azure.com"},
+                {"key": AUTH_ENV, "prompt": "Auth mode: key (default) or entra", "url": "https://ai.azure.com"},
             ],
         }
 
@@ -667,15 +755,13 @@ class MAIImageProvider(ImageGenProvider):
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
-        api_key, endpoint = self._credentials()
+        endpoint, headers, auth_error, auth_type = self._resolve_auth()
         model = _resolve_model(kwargs.get("model"), self.model_override)
         if not prompt:
             return _error(self.name, prompt, aspect, "Prompt is required", "invalid_input", model)
-        if not api_key or not endpoint:
-            return _error(self.name, prompt, aspect, f"Set {API_KEY_ENV} and {ENDPOINT_ENV}", "auth_required", model)
-        problem = _endpoint_problem(endpoint)
-        if problem:
-            return _error(self.name, prompt, aspect, problem, "invalid_config", model)
+        if headers is None:
+            return _error(self.name, prompt, aspect, auth_error, auth_type, model)
+        entra = _auth_mode() == "entra"
 
         sources = ([image_url] if image_url else []) + list(reference_image_urls or [])
         try:
@@ -699,7 +785,7 @@ class MAIImageProvider(ImageGenProvider):
                 form.update({k: "true" for k in _enabled_26_options(model)})
                 response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/edits",
-                    headers={"api-key": api_key},
+                    headers=headers,
                     data=form,
                     files=files,
                     timeout=REQUEST_TIMEOUT,
@@ -712,7 +798,7 @@ class MAIImageProvider(ImageGenProvider):
                 body.update({k: True for k in _enabled_26_options(model)})
                 response = _post_with_retry(
                     f"{endpoint}/mai/v1/images/generations",
-                    headers={**_headers(api_key), "Content-Type": "application/json"},
+                    headers={**headers, "Content-Type": "application/json"},
                     json=body,
                     timeout=REQUEST_TIMEOUT,
                 )
@@ -727,7 +813,7 @@ class MAIImageProvider(ImageGenProvider):
         except requests.RequestException as exc:
             logger.debug("MAI request failed", exc_info=True)
             response = getattr(exc, "response", None)
-            message = _http_error_message(response, model) if response is not None else f"MAI request failed: {exc}"
+            message = _http_error_message(response, model, entra) if response is not None else f"MAI request failed: {exc}"
             return _error(self.name, prompt, aspect, message, "api_error", model)
         except Exception as exc:
             logger.debug("MAI image generation failed", exc_info=True)

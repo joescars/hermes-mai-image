@@ -31,6 +31,7 @@ Repository = "https://github.com/joescars/hermes-mai-image"
 Issues = "https://github.com/joescars/hermes-mai-image/issues"
 
 [project.optional-dependencies]
+entra = ["azure-identity>=1.14"]
 test = ["pytest>=8", "pyyaml>=6", "tomli>=2; python_version < '3.11'"]
 lint = ["ruff>=0.8"]
 
