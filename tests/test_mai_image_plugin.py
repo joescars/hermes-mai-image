@@ -360,6 +360,19 @@ def test_config_model_is_used_when_environment_model_is_unset(monkeypatch):
     assert provider.MAIImageProvider(model=None).default_model() == "configured-deployment"
 
 
+def test_plugin_settings_model_is_used_when_environment_model_is_unset(monkeypatch):
+    provider = load_provider(monkeypatch)
+    monkeypatch.delenv("MAI_IMAGE_MODEL", raising=False)
+    monkeypatch.setattr(provider, "_load_image_gen_config", lambda: {
+        "plugins": {"settings": {"azure-mai-image": {"settings": {
+            "MAI_IMAGE_MODEL": "plugin-deployment"
+        }}}}
+    })
+
+    assert provider.MAIImageProvider(model=None).default_model() == "plugin-deployment"
+    assert provider._setting(provider.MODEL_ENV, "model") == "plugin-deployment"
+
+
 def test_deployment_error_explains_exact_name(monkeypatch):
     provider = load_provider(monkeypatch)
 
