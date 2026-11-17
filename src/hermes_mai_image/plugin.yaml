@@ -1,5 +1,5 @@
 name: azure-mai-image
-version: 0.2.1
+version: 0.3.0
 description: "Microsoft Foundry MAI image generation and editing provider for Hermes Agent."
 author: joescars
 requires_hermes: ">=0.21.6"
