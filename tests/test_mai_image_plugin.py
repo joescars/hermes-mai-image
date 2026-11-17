@@ -1184,6 +1184,29 @@ def _install_fake_azure_identity(monkeypatch, token="entra-token", error=None, f
     monkeypatch.setitem(sys.modules, "azure.identity", identity)
 
 
+def test_entra_provider_rebuilt_when_credential_environment_changes(monkeypatch):
+    """The token provider must not be pinned to the first caller's credential context."""
+    provider = load_provider(monkeypatch)
+    _install_fake_azure_identity(monkeypatch)
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-a")
+    first = provider._entra_token_provider()
+    monkeypatch.setenv("AZURE_TENANT_ID", "tenant-b")
+    second = provider._entra_token_provider()
+
+    assert first is not None
+    assert first is not second
+
+
+def test_entra_provider_is_cached_while_credential_environment_unchanged(monkeypatch):
+    provider = load_provider(monkeypatch)
+    _install_fake_azure_identity(monkeypatch)
+    first = provider._entra_token_provider()
+    second = provider._entra_token_provider()
+
+    assert first is not None
+    assert first is second
+
+
 def test_entra_mode_sends_bearer_and_not_api_key(monkeypatch):
     provider = load_provider(monkeypatch)
     factories = []

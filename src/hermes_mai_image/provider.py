@@ -13,11 +13,12 @@ import mimetypes
 import os
 import random
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import requests
@@ -179,7 +180,37 @@ def _headers(api_key: str) -> Dict[str, str]:
     return {"api-key": api_key, "Accept": "application/json"}
 
 
-_entra_token_provider_cache: Optional[Any] = None
+_entra_cache_lock = threading.Lock()
+_entra_cached_key: Optional[Tuple[Optional[str], ...]] = None
+_entra_cached_provider: Optional[Any] = None
+
+# Environment variables that change which credential ``DefaultAzureCredential`` resolves.
+# The token provider is rebuilt whenever any of these change, so credential rotation or an
+# environment/profile switch takes effect on the next request instead of being pinned to the
+# first caller. Fingerprint values are sensitive (they may include client secrets) and are
+# never logged.
+_ENTRA_CREDENTIAL_ENV: Tuple[str, ...] = (
+    "AZURE_CLIENT_ID",
+    "AZURE_TENANT_ID",
+    "AZURE_CLIENT_SECRET",
+    "AZURE_CLIENT_CERTIFICATE_PATH",
+    "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN",
+    "AZURE_USERNAME",
+    "AZURE_PASSWORD",
+    "AZURE_AUTHORITY_HOST",
+    "AZURE_FEDERATED_TOKEN_FILE",
+    "AZURE_TOKEN_CREDENTIAL",
+    "AZURE_POD_IDENTITY_AUTHORITY_HOST",
+    "IDENTITY_ENDPOINT",
+    "IDENTITY_HEADER",
+    "IDENTITY_SERVER_THUMBPRINT",
+    "MSI_ENDPOINT",
+    "MSI_SECRET",
+)
+
+
+def _entra_credential_fingerprint() -> Tuple[Optional[str], ...]:
+    return tuple(os.environ.get(name) for name in _ENTRA_CREDENTIAL_ENV)
 
 
 def _entra_token_provider() -> Optional[Any]:
@@ -187,21 +218,26 @@ def _entra_token_provider() -> Optional[Any]:
 
     Requires the optional ``azure-identity`` dependency (the ``entra`` extra). The returned
     provider caches its token and refreshes it before expiry, so repeated calls only hit
-    Microsoft Entra ID when a new token is actually needed.
+    Microsoft Entra ID when a new token is actually needed. The provider is rebuilt whenever
+    the Azure credential environment changes, so a rotated or switched credential is never
+    pinned to the process's first caller.
     """
-    global _entra_token_provider_cache
-    if _entra_token_provider_cache is None:
-        try:
-            from azure.identity import (
-                DefaultAzureCredential,
-                get_bearer_token_provider,
+    global _entra_cached_key, _entra_cached_provider
+    fingerprint = _entra_credential_fingerprint()
+    with _entra_cache_lock:
+        if _entra_cached_provider is None or _entra_cached_key != fingerprint:
+            try:
+                from azure.identity import (
+                    DefaultAzureCredential,
+                    get_bearer_token_provider,
+                )
+            except ImportError:
+                return None
+            _entra_cached_provider = get_bearer_token_provider(
+                DefaultAzureCredential(), ENTRA_SCOPE
             )
-        except ImportError:
-            return None
-        _entra_token_provider_cache = get_bearer_token_provider(
-            DefaultAzureCredential(), ENTRA_SCOPE
-        )
-    return _entra_token_provider_cache
+            _entra_cached_key = fingerprint
+        return _entra_cached_provider
 
 
 def _auth_mode() -> str:
